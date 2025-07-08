@@ -182,15 +182,12 @@ class LSHW:
                 self.find_storage(bus)
             if bus["class"] == "display":
                 self.find_gpus(bus)
+            if bus["class"] == "network":
+                self.find_network(bus)
 
+            # Recursively traverse deeper levels
             if "children" in bus:
-                for b in bus["children"]:
-                    if b["class"] == "storage":
-                        self.find_storage(b)
-                    if b["class"] == "network":
-                        self.find_network(b)
-                    if b["class"] == "display":
-                        self.find_gpus(b)
+                self.walk_bridge(bus)
 
 
 if __name__ == "__main__":
