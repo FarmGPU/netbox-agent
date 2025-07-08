@@ -95,8 +95,10 @@ class LSHW:
 
     def find_storage(self, obj):
         if "children" in obj:
-            # For storage controllers with children (like NVMe), we need to combine
-            # the parent controller info with the child namespace info
+            # For storage controllers with children, we need to handle two cases:
+            # 1. NVMe: parent has metadata, children have logical names
+            # 2. SAS/SCSI: children have both metadata and logical names
+            
             parent_info = {
                 "product": obj.get("product"),
                 "vendor": obj.get("vendor"),
@@ -106,7 +108,7 @@ class LSHW:
             }
             
             for device in obj["children"]:
-                # Skip non-disk children (like hwmon, ng devices)
+                # Skip non-disk children (like hwmon, ng devices, enclosures)
                 if device.get("class") != "disk":
                     continue
                 
@@ -119,17 +121,32 @@ class LSHW:
                 if "/dev/ng" in logicalname:
                     continue
                 
-                # Combine parent controller info with child namespace info
-                disk_info = {
-                    "logicalname": logicalname,
-                    "product": parent_info["product"],
-                    "vendor": parent_info["vendor"],
-                    "serial": parent_info["serial"],
-                    "version": parent_info["version"],
-                    "size": device.get("size"),
-                    "description": parent_info["description"],
-                    "type": parent_info["description"],
-                }
+                # Check if the child has its own metadata (SAS/SCSI case)
+                # If child has product info, use it; otherwise use parent info (NVMe case)
+                if device.get("product"):
+                    # SAS/SCSI case: child has all the metadata
+                    disk_info = {
+                        "logicalname": logicalname,
+                        "product": device.get("product"),
+                        "vendor": device.get("vendor"),
+                        "serial": device.get("serial"),
+                        "version": device.get("version"),
+                        "size": device.get("size"),
+                        "description": device.get("description"),
+                        "type": device.get("description"),
+                    }
+                else:
+                    # NVMe case: combine parent controller info with child namespace info
+                    disk_info = {
+                        "logicalname": logicalname,
+                        "product": parent_info["product"],
+                        "vendor": parent_info["vendor"],
+                        "serial": parent_info["serial"],
+                        "version": parent_info["version"],
+                        "size": device.get("size"),
+                        "description": parent_info["description"],
+                        "type": parent_info["description"],
+                    }
                 self.disks.append(disk_info)
         elif "driver" in obj["configuration"] and "nvme" in obj["configuration"]["driver"]:
             if not is_tool("nvme"):
