@@ -95,18 +95,42 @@ class LSHW:
 
     def find_storage(self, obj):
         if "children" in obj:
+            # For storage controllers with children (like NVMe), we need to combine
+            # the parent controller info with the child namespace info
+            parent_info = {
+                "product": obj.get("product"),
+                "vendor": obj.get("vendor"),
+                "serial": obj.get("serial"),
+                "version": obj.get("version"),
+                "description": obj.get("description"),
+            }
+            
             for device in obj["children"]:
-                self.disks.append(
-                    {
-                        "logicalname": device.get("logicalname"),
-                        "product": device.get("product"),
-                        "serial": device.get("serial"),
-                        "version": device.get("version"),
-                        "size": device.get("size"),
-                        "description": device.get("description"),
-                        "type": device.get("description"),
-                    }
-                )
+                # Skip non-disk children (like hwmon, ng devices)
+                if device.get("class") != "disk":
+                    continue
+                
+                # Skip devices without actual disk logical names
+                logicalname = device.get("logicalname")
+                if not logicalname or not logicalname.startswith("/dev/"):
+                    continue
+                
+                # Skip namespace group devices (ng) - these are not actual disks
+                if "/dev/ng" in logicalname:
+                    continue
+                
+                # Combine parent controller info with child namespace info
+                disk_info = {
+                    "logicalname": logicalname,
+                    "product": parent_info["product"],
+                    "vendor": parent_info["vendor"],
+                    "serial": parent_info["serial"],
+                    "version": parent_info["version"],
+                    "size": device.get("size"),
+                    "description": parent_info["description"],
+                    "type": parent_info["description"],
+                }
+                self.disks.append(disk_info)
         elif "driver" in obj["configuration"] and "nvme" in obj["configuration"]["driver"]:
             if not is_tool("nvme"):
                 logging.error("nvme-cli >= 1.0 does not seem to be installed")
