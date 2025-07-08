@@ -94,35 +94,28 @@ class LSHW:
         )
 
     def find_storage(self, obj):
-        # Recursively find all disk children
-        if obj.get("class") == "disk":
-            logicalname = obj.get("logicalname", "")
-            if logicalname and (
-                isinstance(logicalname, str) and logicalname.startswith("/dev/") and
-                not logicalname.startswith("/dev/hwmon") and
-                not logicalname.startswith("/dev/ng")
-            ):
-                self.disks.append({
-                    "logicalname": logicalname,
-                    "product": obj.get("product"),
-                    "serial": obj.get("serial"),
-                    "version": obj.get("version"),
-                    "size": obj.get("size"),
-                    "description": obj.get("description"),
-                    "type": obj.get("description"),
-                    "vendor": obj.get("vendor"),
-                })
-        # Recurse into children if present
-        for child in obj.get("children", []):
-            self.find_storage(child)
-        # Fallback: if NVMe controller with no children, use nvme-cli
-        if (
-            obj.get("class") == "storage"
-            and not obj.get("children")
-            and "configuration" in obj
-            and "driver" in obj["configuration"]
-            and "nvme" in obj["configuration"]["driver"]
-        ):
+        if "children" in obj:
+            for device in obj["children"]:
+                # Only process actual disk devices, skip hwmon and other non-disk devices
+                logicalname = device.get("logicalname", "")
+                if logicalname and (
+                    logicalname.startswith("/dev/") and 
+                    not logicalname.startswith("/dev/hwmon") and
+                    not logicalname.startswith("/dev/ng")
+                ):
+                    self.disks.append(
+                        {
+                            "logicalname": device.get("logicalname"),
+                            "product": device.get("product"),
+                            "serial": device.get("serial"),
+                            "version": device.get("version"),
+                            "size": device.get("size"),
+                            "description": device.get("description"),
+                            "type": device.get("description"),
+                            "vendor": device.get("vendor"),
+                        }
+                    )
+        elif "driver" in obj["configuration"] and "nvme" in obj["configuration"]["driver"]:
             if not is_tool("nvme"):
                 logging.error("nvme-cli >= 1.0 does not seem to be installed")
                 return
