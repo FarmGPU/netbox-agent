@@ -113,8 +113,12 @@ class LSHW:
                     continue
                 
                 # Skip devices without actual disk logical names
-                logicalname = device.get("logicalname")
-                if not logicalname or not logicalname.startswith("/dev/"):
+                try:
+                    logicalname = device.get("logicalname")
+                    if not logicalname or not logicalname.startswith("/dev/"):
+                        continue
+                except:
+                    print('!', logicalname)
                     continue
                 
                 # Skip namespace group devices (ng) - these are not actual disks
