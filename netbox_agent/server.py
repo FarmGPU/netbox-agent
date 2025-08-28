@@ -147,7 +147,16 @@ class ServerBase:
         """
         Return the Service Tag from dmidecode info
         """
-        return self.system[0]["Serial Number"].strip()
+        tag = self.system[0]["Serial Number"].strip()
+        if not tag:
+            tag = self.get_system_uuid()
+        return tag
+
+    def get_system_uuid(self):
+        """
+        Return the UUID from dmidecode info
+        """
+        return self.system[0].get('UUID')
 
     def get_expansion_service_tag(self):
         """
@@ -530,6 +539,7 @@ class ServerBase:
         print("Chassis:", self.get_chassis())
         print("Chassis service tag:", self.get_chassis_service_tag())
         print("Service tag:", self.get_service_tag())
+        print("UUID:", self.get_system_uuid())
         print(
             "NIC:",
         )
