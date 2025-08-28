@@ -81,8 +81,11 @@ class PowerSupply:
         for psu in psus:
             if psu["name"] not in [x.name for x in nb_psus]:
                 logging.info("Creating PSU {name} ({description}), {maximum_draw}W".format(**psu))
-                nb_psu = nb.dcim.power_ports.create(**psu)
-
+                try:
+                    nb_psu = nb.dcim.power_ports.create(**psu)
+                except Exception as e:
+                    logging.error(f"Unable to create PSU: {e}")
+                    continue
         return True
 
     def report_power_consumption(self):
