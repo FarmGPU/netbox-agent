@@ -542,7 +542,7 @@ class Network(object):
                 if nic["mac"]:
                     self.update_interface_macs(interface, [nic["mac"]])
 
-            if nic["mac"] and nic["mac"] != interface.mac_address:
+            if interface.mac_address and nic["mac"] and nic["mac"] != interface.mac_address:
                 logging.debug(f'! nic={nic} | interface.mac_address={interface.mac_address}')
                 logging.info(
                     "Updating interface {interface} mac to: {mac}".format(
