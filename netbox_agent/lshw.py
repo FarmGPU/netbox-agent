@@ -28,7 +28,7 @@ class LSHW:
         self.gpus = []
         self.vendor = self.hw_info["vendor"]
         self.product = self.hw_info["product"]
-        self.chassis_serial = self.hw_info["serial"]
+        self.chassis_serial = self.hw_info.get("serial", "")
         self.motherboard_serial = self.hw_info["children"][0].get("serial", "No S/N")
         self.motherboard = self.hw_info["children"][0].get("product", "Motherboard")
 
