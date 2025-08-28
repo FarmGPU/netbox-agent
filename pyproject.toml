@@ -24,14 +24,14 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "pynetbox==7.4.1",
-    "netaddr==1.3.0",
-    "netifaces2==0.0.22",
-    "pyyaml==6.0.2",
-    "jsonargparse==4.36.0",
-    "python-slugify==8.0.4",
-    "packaging==24.2",
-    "distro==1.9.0",
+    "pynetbox",
+    "netaddr",
+    "netifaces2",
+    "pyyaml",
+    "jsonargparse",
+    "python-slugify",
+    "packaging",
+    "distro",
 ]
 
 [project.optional-dependencies]
