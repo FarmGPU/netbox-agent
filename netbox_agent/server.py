@@ -201,7 +201,7 @@ class ServerBase:
         raise NotImplementedError
 
     def _netbox_create_chassis(self, datacenter, tenant, rack):
-        device_type = get_device_type(self.get_chassis())
+        device_type = get_device_type(self.get_chassis(), self.manufacturer)
         device_role = get_device_role(config.device.chassis_role)
         serial = self.get_chassis_service_tag()
         logging.info("Creating chassis blade (serial: {serial})".format(serial=serial))
@@ -220,7 +220,7 @@ class ServerBase:
 
     def _netbox_create_blade(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_product_name())
+        device_type = get_device_type(self.get_product_name(), self.manufacturer)
         serial = self.get_service_tag()
         hostname = self.get_hostname()
         logging.info(
@@ -244,7 +244,7 @@ class ServerBase:
 
     def _netbox_create_blade_expansion(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_expansion_product())
+        device_type = get_device_type(self.get_expansion_product(), self.manufacturer)
         serial = self.get_expansion_service_tag()
         hostname = self.get_hostname() + " expansion"
         logging.info(
@@ -278,7 +278,7 @@ class ServerBase:
 
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
-        device_type = get_device_type(self.get_product_name())
+        device_type = get_device_type(self.get_product_name(), self.manufacturer)
         if not device_type:
             raise Exception('Chassis "{}" doesn\'t exist'.format(self.get_chassis()))
         serial = self.get_service_tag()

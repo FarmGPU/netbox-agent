@@ -1,5 +1,6 @@
 from contextlib import suppress
 from netbox_agent.config import netbox_instance as nb
+from netbox_agent.logging import logging
 from slugify import slugify
 from shutil import which
 import distro
@@ -20,10 +21,37 @@ def get_device_role(role):
     return device_role
 
 
-def get_device_type(type):
+def get_device_type(type, manufacturer=None):
     device_type = nb.dcim.device_types.get(model=type)
     if device_type is None:
-        raise Exception('DeviceType "{}" does not exist, please create it'.format(type))
+        if manufacturer is None:
+            raise Exception('DeviceType "{}" does not exist, please create it'.format(type))
+        
+        # Auto-create the device type
+        logging.info("Creating missing device type {type} for manufacturer {manufacturer}".format(
+            type=type, manufacturer=manufacturer
+        ))
+        
+        # Find or create the manufacturer
+        nb_manufacturer = nb.dcim.manufacturers.get(name=manufacturer)
+        if not nb_manufacturer:
+            logging.info("Creating missing manufacturer {name}".format(name=manufacturer))
+            nb_manufacturer = nb.dcim.manufacturers.create(
+                name=manufacturer,
+                slug=slugify(manufacturer),
+            )
+        
+        # Create the device type
+        device_type = nb.dcim.device_types.create(
+            model=type,
+            manufacturer=nb_manufacturer.id,
+            slug=slugify(type),
+        )
+        
+        logging.info("Created device type {type} for manufacturer {manufacturer}".format(
+            type=type, manufacturer=manufacturer
+        ))
+    
     return device_type
 
 
