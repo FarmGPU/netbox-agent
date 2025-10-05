@@ -115,7 +115,18 @@ class LSHW:
                 # Skip devices without actual disk logical names
                 try:
                     logicalname = device.get("logicalname")
-                    if not logicalname or not logicalname.startswith("/dev/"):
+                    # Handle both string and list logicalname (e.g., ["/dev/nvme0n1", "/mnt/chunks1"])
+                    if isinstance(logicalname, list):
+                        # Find the first /dev/ path in the list
+                        dev_path = None
+                        for path in logicalname:
+                            if isinstance(path, str) and path.startswith("/dev/"):
+                                dev_path = path
+                                break
+                        if not dev_path:
+                            continue
+                        logicalname = dev_path
+                    elif not logicalname or not logicalname.startswith("/dev/"):
                         continue
                 except:
                     print('!', logicalname)
@@ -141,13 +152,15 @@ class LSHW:
                     }
                 else:
                     # NVMe case: combine parent controller info with child namespace info
+                    # Try to get better info from nvme list command if available
+                    nvme_info = self._get_nvme_info(logicalname)
                     disk_info = {
                         "logicalname": logicalname,
-                        "product": parent_info["product"],
-                        "vendor": parent_info["vendor"],
-                        "serial": parent_info["serial"],
-                        "version": parent_info["version"],
-                        "size": device.get("size"),
+                        "product": nvme_info.get("product", parent_info["product"]),
+                        "vendor": nvme_info.get("vendor", parent_info["vendor"]),
+                        "serial": nvme_info.get("serial", parent_info["serial"]),
+                        "version": nvme_info.get("version", parent_info["version"]),
+                        "size": nvme_info.get("size", device.get("size")),
                         "description": parent_info["description"],
                         "type": parent_info["description"],
                     }
@@ -217,6 +230,30 @@ class LSHW:
                 "description": obj.get("description", ""),
             }
             self.gpus.append(infos)
+
+    def _get_nvme_info(self, device_path):
+        """Get NVMe device information using nvme list command"""
+        if not is_tool("nvme"):
+            return {}
+        
+        try:
+            nvme_output = subprocess.check_output(["nvme", "list", "-o", "json"], encoding="utf8")
+            nvme_data = json.loads(nvme_output)
+            
+            # Find the device in the nvme list output
+            for device in nvme_data.get("Devices", []):
+                if device.get("DevicePath") == device_path:
+                    return {
+                        "product": device.get("ModelNumber"),
+                        "serial": device.get("SerialNumber"),
+                        "version": device.get("Firmware"),
+                        "size": device.get("UsedBytes") or device.get("PhysicalSize"),
+                        "vendor": "Unknown"  # Will be determined by get_vendor() in inventory.py
+                    }
+        except Exception:
+            pass
+        
+        return {}
 
     def walk_bridge(self, obj):
         if "children" not in obj:
