@@ -182,9 +182,13 @@ class LSHW:
                         "description": "NVME",
                         "type": "NVME",
                     }
-                    if "UsedSize" in device:
+                    # Use PhysicalSize for the actual disk capacity
+                    # UsedBytes/UsedSize only shows used space, not total capacity
+                    if "PhysicalSize" in device:
+                        d["size"] = device["PhysicalSize"]
+                    elif "UsedSize" in device:
                         d["size"] = device["UsedSize"]
-                    if "UsedBytes" in device:
+                    elif "UsedBytes" in device:
                         d["size"] = device["UsedBytes"]
                     self.disks.append(d)
             except Exception:
