@@ -251,7 +251,8 @@ class LSHW:
                         "product": device.get("ModelNumber"),
                         "serial": device.get("SerialNumber"),
                         "version": device.get("Firmware"),
-                        "size": device.get("UsedBytes") or device.get("PhysicalSize"),
+                        # Use PhysicalSize (total capacity) instead of UsedBytes (used space)
+                        "size": device.get("PhysicalSize") or device.get("UsedBytes"),
                         "vendor": "Unknown"  # Will be determined by get_vendor() in inventory.py
                     }
         except Exception:
