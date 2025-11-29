@@ -56,16 +56,23 @@ class IPMI:
         ret["mtu"] = 1500
         ret["bonding"] = False
         try:
-            ret["mac"] = _ipmi["MAC Address"]
+            ret["mac"] = _ipmi.get("MAC Address")
             if ret["mac"]:
                 ret["mac"] = ret["mac"].upper()
-            ret["vlan"] = (
-                int(_ipmi["802.1q VLAN ID"]) if _ipmi["802.1q VLAN ID"] != "Disabled" else None
-            )
-            ip = _ipmi["IP Address"]
-            netmask = _ipmi["Subnet Mask"]
-        except KeyError as e:
-            logging.error("IPMI decoding failed, missing: %s", e.args[0])
+            # VLAN ID is optional - some BMCs (like Supermicro) don't report it
+            vlan_id = _ipmi.get("802.1q VLAN ID")
+            if vlan_id and vlan_id != "Disabled":
+                ret["vlan"] = int(vlan_id)
+            else:
+                ret["vlan"] = None
+            ip = _ipmi.get("IP Address")
+            netmask = _ipmi.get("Subnet Mask")
+            if not ip or not netmask or not ret["mac"]:
+                logging.error("IPMI decoding failed: missing required fields (IP=%s, Netmask=%s, MAC=%s)", 
+                              ip, netmask, ret["mac"])
+                return {}
+        except (KeyError, ValueError) as e:
+            logging.error("IPMI decoding failed: %s", e)
             return {}
         address = str(IPNetwork("{}/{}".format(ip, netmask)))
 
