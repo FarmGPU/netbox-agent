@@ -159,13 +159,15 @@ class Inventory:
 
     def create_netbox_interface(self, iface):
         manufacturer = self.find_or_create_manufacturer(iface["vendor"])
+        # Truncate serial to 50 chars (NetBox limit) - IB GUIDs can be longer
+        serial = "{}".format(iface["serial"])[:50] if iface.get("serial") else ""
         _ = nb.dcim.inventory_items.create(
             device=self.device_id,
             manufacturer=manufacturer.id,
             discovered=True,
             tags=[{"name": INVENTORY_TAG["interface"]["name"]}],
             name="{}".format(iface["product"]),
-            serial="{}".format(iface["serial"]),
+            serial=serial,
             description="{} {}".format(iface["description"], iface["name"]),
         )
 
@@ -341,7 +343,8 @@ class Inventory:
         for disk in self.lshw.get_hw_linux("storage"):
             if self.is_virtual_disk(disk, raid_devices):
                 continue
-            size = round(int(disk.get("size", 0)) / 1073741824, 1)
+            disk_size = disk.get("size")
+            size = round(int(disk_size if disk_size is not None else 0) / 1073741824, 1)
             d = {
                 "name": "",
                 "Size": "{} GB".format(size),
@@ -369,17 +372,17 @@ class Inventory:
 
         logicalname = disk.get("logicalname")
         desc = disk.get("description")
-        name = "{} ({})".format(disk["Model"], disk["Size"])
-        description = disk["Type"]
-        sn = disk.get("SN", "unknown")
+        name = "{} ({})".format(disk.get("Model") or "Unknown", disk.get("Size") or "0 GB")
+        description = disk.get("Type") or ""
+        sn = disk.get("SN") or "unknown"
 
         parms = {
             "device": self.device_id,
             "discovered": True,
             "tags": [{"name": INVENTORY_TAG["disk"]["name"]}],
-            "name": name,
-            "serial": sn,
-            "part_id": disk["Model"],
+            "name": name[:64],  # NetBox name limit
+            "serial": sn[:50],  # NetBox serial limit
+            "part_id": (disk.get("Model") or "")[:50],
             "description": description,
             "manufacturer": getattr(manufacturer, "id", None),
         }
