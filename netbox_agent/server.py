@@ -3,6 +3,7 @@ from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
 from netbox_agent.hypervisor import Hypervisor
 from netbox_agent.inventory import Inventory
+from netbox_agent.ipmi import IPMI
 from netbox_agent.location import Datacenter, Rack, Tenant
 from netbox_agent.misc import (
     create_netbox_tags,
@@ -45,6 +46,16 @@ class ServerBase:
         self.custom_fields.update(
             dict([(k.strip(), v.strip()) for k, v in [f.split("=", 1) for f in config_cf]])
         )
+
+        # Auto-populate bmc_mac_address from IPMI if not already set
+        if "bmc_mac_address" not in self.custom_fields:
+            try:
+                ipmi_data = IPMI().parse()
+                if ipmi_data and ipmi_data.get("mac"):
+                    self.custom_fields["bmc_mac_address"] = ipmi_data["mac"]
+                    logging.info("Auto-populated bmc_mac_address from IPMI: %s", ipmi_data["mac"])
+            except Exception as e:
+                logging.warning("Failed to get BMC MAC from IPMI: %s", e)
 
     def get_tenant(self):
         tenant = Tenant()
@@ -298,6 +309,7 @@ class ServerBase:
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
             tags=[{"name": x} for x in self.tags],
+            custom_fields=self.custom_fields,
         )
         return new_server
 
