@@ -290,6 +290,15 @@ class Network(object):
                 interface.untagged_vlan = nb_vlan.id
         return update, interface
 
+    def _is_valid_mac(self, mac):
+        """Check if MAC address is a valid 6-byte format (not an IB GUID)."""
+        if not mac:
+            return False
+        # Standard MAC is 6 octets (17 chars with colons: AA:BB:CC:DD:EE:FF)
+        # InfiniBand GUIDs are 20 octets which NetBox doesn't accept
+        parts = mac.split(":")
+        return len(parts) == 6 and all(len(p) == 2 for p in parts)
+
     def update_interface_macs(self, nic, macs):
         nb_macs = list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
         # Clean
@@ -299,6 +308,10 @@ class Network(object):
                 nb_mac.delete()
         # Add missing
         for mac in macs:
+            # Skip invalid MAC formats (e.g., InfiniBand GUIDs)
+            if not self._is_valid_mac(mac):
+                logging.debug("Skipping invalid MAC format {mac} on {nic}".format(mac=mac, nic=nic))
+                continue
             if mac not in {nb_mac.mac_address for nb_mac in nb_macs}:
                 logging.debug("Adding MAC {mac} to {nic}".format(mac=mac, nic=nic))
                 self.nb_net.mac_addresses.create(
