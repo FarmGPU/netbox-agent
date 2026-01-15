@@ -510,6 +510,28 @@ class ServerBase:
             server.platform = self.device_platform
             update += 1
 
+        # Validate oob_ip before saving - clear if invalid to prevent save errors
+        if server.oob_ip:
+            try:
+                oob_ip_id = server.oob_ip.id if hasattr(server.oob_ip, 'id') else server.oob_ip
+                oob_ip_obj = nb.ipam.ip_addresses.get(id=oob_ip_id)
+                if oob_ip_obj and not oob_ip_obj.assigned_object:
+                    logging.warning(f"Clearing invalid oob_ip {oob_ip_obj.address} - not assigned to any interface")
+                    server.oob_ip = None
+                    update += 1
+                elif oob_ip_obj and oob_ip_obj.assigned_object:
+                    assigned_device_id = None
+                    if hasattr(oob_ip_obj.assigned_object, 'device'):
+                        assigned_device_id = oob_ip_obj.assigned_object.device.id
+                    if assigned_device_id and assigned_device_id != server.id:
+                        logging.warning(f"Clearing invalid oob_ip {oob_ip_obj.address} - assigned to different device")
+                        server.oob_ip = None
+                        update += 1
+            except Exception as e:
+                logging.warning(f"Error validating oob_ip, clearing: {e}")
+                server.oob_ip = None
+                update += 1
+
         if update:
             server.save()
 
@@ -524,17 +546,52 @@ class ServerBase:
             if update:
                 expansion.save()
 
-        myips = nb.ipam.ip_addresses.filter(device_id=server.id)
-        update = 0
+        # Handle IPMI/OOB IP setup
+        if config.network.ipmi:
+            try:
+                ipmi_data = IPMI().parse()
+                if ipmi_data and ipmi_data.get("ip"):
+                    ipmi_ip_addr = ipmi_data["ip"]
+                    logging.info(f"Setting up IPMI with IP: {ipmi_ip_addr}")
 
-        for ip in myips:
-            if ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
-                server.oob_ip = ip.id
-                update += 1
-                break
+                    # Step 1: Find or create IPMI interface
+                    ipmi_interface = nb.dcim.interfaces.get(device_id=server.id, name="IPMI")
+                    if not ipmi_interface:
+                        logging.info(f"Creating IPMI interface on {server.name}")
+                        ipmi_interface = nb.dcim.interfaces.create(
+                            device=server.id,
+                            name="IPMI",
+                            type="other",
+                            mgmt_only=True,
+                        )
 
-        if update:
-            server.save()
+                    # Step 2: Find or create IP, assign to IPMI interface
+                    existing_ip = nb.ipam.ip_addresses.get(address=ipmi_ip_addr)
+                    if existing_ip:
+                        if existing_ip.assigned_object_id != ipmi_interface.id:
+                            logging.info(f"Assigning IP {ipmi_ip_addr} to IPMI interface")
+                            existing_ip.assigned_object_type = "dcim.interface"
+                            existing_ip.assigned_object_id = ipmi_interface.id
+                            existing_ip.save()
+                        ip_id = existing_ip.id
+                    else:
+                        logging.info(f"Creating IP {ipmi_ip_addr} for IPMI interface")
+                        new_ip = nb.ipam.ip_addresses.create(
+                            address=ipmi_ip_addr,
+                            status="active",
+                            assigned_object_type="dcim.interface",
+                            assigned_object_id=ipmi_interface.id,
+                        )
+                        ip_id = new_ip.id
+
+                    # Step 3: Set as oob_ip
+                    current_oob_id = server.oob_ip.id if server.oob_ip else None
+                    if current_oob_id != ip_id:
+                        logging.info(f"Setting OOB IP to {ipmi_ip_addr}")
+                        server.oob_ip = ip_id
+                        server.save()
+            except Exception as e:
+                logging.warning(f"Failed to configure IPMI/OOB IP: {e}")
 
         logging.debug("Finished updating Server!")
 
