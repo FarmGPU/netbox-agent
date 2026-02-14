@@ -22,7 +22,10 @@ from pprint import pprint
 
 # Base-36 asset tag validation: 4-char alphanumeric
 _ASSET_TAG_RE = re.compile(r"^[0-9A-Z]{4}$", re.IGNORECASE)
-_ASSET_TAG_PLACEHOLDERS = {"Not Specified", "None", "N/A", "To Be Filled By O.E.M.", ""}
+_ASSET_TAG_PLACEHOLDERS = {
+    "Not Specified", "None", "N/A", "To Be Filled By O.E.M.", "",
+    "Chassis Asset Tag", "Default string", "No Asset Tag",
+}
 
 
 class ServerBase:
@@ -316,12 +319,12 @@ class ServerBase:
 
     def get_asset_tag(self):
         """
-        Read asset tag from SMBIOS Chassis Asset Tag (Type 3) or config command.
-        Returns validated Base-36 tag string or None.
+        Read asset tag from config command, IPMI FRU, or DMI chassis.
+        Returns validated Base-36 tag string (4 chars, 0-9/A-Z) or None.
         """
         tag = None
 
-        # Try config command first
+        # Source 1: Config command (highest priority)
         asset_tag_cmd = getattr(config.device, "asset_tag_cmd", None)
         if asset_tag_cmd:
             try:
@@ -329,12 +332,26 @@ class ServerBase:
             except Exception:
                 tag = None
 
-        # Fall back to DMI Chassis Asset Tag
-        if not tag or tag in _ASSET_TAG_PLACEHOLDERS:
+        # Source 2: IPMI FRU "Product Asset Tag" (most reliable on Supermicro)
+        if not tag or tag in _ASSET_TAG_PLACEHOLDERS or not _ASSET_TAG_RE.match(tag):
+            try:
+                output = subprocess.check_output(
+                    ["ipmitool", "fru", "print", "0"],
+                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                )
+                for line in output.splitlines():
+                    if "Product Asset Tag" in line and ":" in line:
+                        tag = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+
+        # Source 3: DMI Chassis Asset Tag (fallback)
+        if not tag or tag in _ASSET_TAG_PLACEHOLDERS or not _ASSET_TAG_RE.match(tag):
             if self.chassis:
                 tag = self.chassis[0].get("Asset Tag", "").strip()
 
-        # Validate format
+        # Validate: must be exactly 4 alphanumeric chars, not a placeholder
         if tag and tag not in _ASSET_TAG_PLACEHOLDERS and _ASSET_TAG_RE.match(tag):
             return tag.upper()
         return None
