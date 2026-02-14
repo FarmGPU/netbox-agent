@@ -147,6 +147,33 @@ def get_config():
     )
     p.add_argument("--dump-disks-map", help="File path to dump physical/virtual disks map")
 
+    # Module-based inventory (replaces legacy inventory items)
+    p.add_argument(
+        "--modules",
+        action="store_true",
+        help="Enable Module-based hardware inventory (new Modules API)",
+    )
+    p.add_argument(
+        "--update-modules",
+        action="store_true",
+        help="Update module-based inventory on this run",
+    )
+    p.add_argument(
+        "--spare-device-name",
+        default="SPARE-INVENTORY",
+        help="Name of the spare inventory device for re-parenting",
+    )
+    p.add_argument(
+        "--device.default_owner",
+        default="FarmGPU",
+        help="Default owner value for new devices and modules",
+    )
+    p.add_argument(
+        "--device.asset_tag_cmd",
+        default=None,
+        help="Command to read asset tag from hardware (e.g., SMBIOS/FRU)",
+    )
+
     options = p.parse_args()
     return options
 

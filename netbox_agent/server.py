@@ -1,3 +1,9 @@
+import re
+import subprocess
+import logging
+import socket
+import sys
+
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
@@ -13,10 +19,10 @@ from netbox_agent.misc import (
 from netbox_agent.network import ServerNetwork
 from netbox_agent.power import PowerSupply
 from pprint import pprint
-import subprocess
-import logging
-import socket
-import sys
+
+# Base-36 asset tag validation: 4-char alphanumeric
+_ASSET_TAG_RE = re.compile(r"^[0-9A-Z]{4}$", re.IGNORECASE)
+_ASSET_TAG_PLACEHOLDERS = {"Not Specified", "None", "N/A", "To Be Filled By O.E.M.", ""}
 
 
 class ServerBase:
@@ -279,7 +285,15 @@ class ServerBase:
                 serial=serial, hostname=hostname
             )
         )
-        new_server = nb.dcim.devices.create(
+
+        # Build custom fields with defaults for new fields
+        cf = dict(self.custom_fields)
+        default_owner = getattr(config.device, "default_owner", "FarmGPU")
+        cf.setdefault("owner", default_owner)
+        cf.setdefault("environment", "Production")
+        cf.setdefault("record_completeness", "incomplete")
+
+        create_kwargs = dict(
             name=hostname,
             serial=serial,
             role=device_role.id,
@@ -289,14 +303,59 @@ class ServerBase:
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
             tags=[{"name": x} for x in self.tags],
+            custom_fields=cf,
         )
+
+        # Set asset tag if available
+        asset_tag = self.get_asset_tag()
+        if asset_tag:
+            create_kwargs["asset_tag"] = asset_tag
+
+        new_server = nb.dcim.devices.create(**create_kwargs)
         return new_server
 
+    def get_asset_tag(self):
+        """
+        Read asset tag from SMBIOS Chassis Asset Tag (Type 3) or config command.
+        Returns validated Base-36 tag string or None.
+        """
+        tag = None
+
+        # Try config command first
+        asset_tag_cmd = getattr(config.device, "asset_tag_cmd", None)
+        if asset_tag_cmd:
+            try:
+                tag = subprocess.getoutput(asset_tag_cmd).strip()
+            except Exception:
+                tag = None
+
+        # Fall back to DMI Chassis Asset Tag
+        if not tag or tag in _ASSET_TAG_PLACEHOLDERS:
+            if self.chassis:
+                tag = self.chassis[0].get("Asset Tag", "").strip()
+
+        # Validate format
+        if tag and tag not in _ASSET_TAG_PLACEHOLDERS and _ASSET_TAG_RE.match(tag):
+            return tag.upper()
+        return None
+
     def get_netbox_server(self, expansion=False):
-        if expansion is False:
-            return nb.dcim.devices.get(serial=self.get_service_tag())
-        else:
+        """
+        Dual-mode device lookup: prefer asset_tag, fall back to serial.
+        """
+        if expansion:
             return nb.dcim.devices.get(serial=self.get_expansion_service_tag())
+
+        # Try asset tag first
+        asset_tag = self.get_asset_tag()
+        if asset_tag:
+            device = nb.dcim.devices.get(asset_tag=asset_tag)
+            if device:
+                return device
+            logging.debug("No device found with asset_tag=%s, falling back to serial", asset_tag)
+
+        # Fall back to serial
+        return nb.dcim.devices.get(serial=self.get_service_tag())
 
     def _netbox_set_or_update_blade_slot(self, server, chassis, datacenter):
         # before everything check if right chassis
@@ -417,6 +476,18 @@ class ServerBase:
             if not server:
                 server = self._netbox_create_server(datacenter, tenant, rack)
 
+        # Sync asset tag: if BIOS has one and NetBox doesn't, push it
+        local_asset_tag = self.get_asset_tag()
+        if local_asset_tag and getattr(server, "asset_tag", None) != local_asset_tag:
+            logging.info(
+                "Updating asset_tag on '%s': %s → %s",
+                server.name,
+                getattr(server, "asset_tag", None),
+                local_asset_tag,
+            )
+            server.asset_tag = local_asset_tag
+            server.save()
+
         logging.debug("Updating Server...")
         # check network cards
         if config.register or config.update_all or config.update_network:
@@ -425,10 +496,18 @@ class ServerBase:
         update_inventory = config.inventory and (
             config.register or config.update_all or config.update_inventory
         )
-        # update inventory if feature is enabled
+        # update inventory if feature is enabled (legacy Inventory Items)
         self.inventory = Inventory(server=self)
         if update_inventory:
             self.inventory.create_or_update()
+        # update modules if feature is enabled (new Modules API)
+        update_modules = getattr(config, "modules", False) and (
+            config.register or config.update_all or getattr(config, "update_modules", False)
+        )
+        if update_modules:
+            from netbox_agent.modules import ModuleManager
+            self.module_manager = ModuleManager(server=self, config=config)
+            self.module_manager.create_or_update()
         # update psu
         if config.register or config.update_all or config.update_psu:
             self.power = PowerSupply(server=self)

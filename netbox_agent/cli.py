@@ -52,6 +52,7 @@ def run(config):
         or config.update_location
         or config.update_inventory
         or config.update_psu
+        or getattr(config, "update_modules", False)
     ):
         server.netbox_create_or_update(config)
     if config.debug:

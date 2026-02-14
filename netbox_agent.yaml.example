@@ -51,3 +51,22 @@ rack_location:
 #   regex: '.*-(\d+)'
 
 inventory: true
+
+#
+# Module-based inventory (new Modules API, replaces legacy inventory items)
+# Can coexist with inventory: true during migration transition
+#
+# modules: true
+# update-modules: true
+
+#
+# Spare inventory device name for re-parenting modules when hardware is removed
+#
+# spare-device-name: "SPARE-INVENTORY"
+
+#
+# Device defaults for new custom fields
+#
+#device:
+# default_owner: "FarmGPU"
+# asset_tag_cmd: "dmidecode -s chassis-asset-tag"
