@@ -1,0 +1,230 @@
+{
+  "system": {
+    "hostname": "lenovo-h200-1",
+    "kernel": "5.15.0-91-generic",
+    "arch": "x86_64",
+    "distro": "Ubuntu 22.04.3 LTS",
+    "collected_at": "2026-02-15T00:00:00+00:00",
+    "collected_by": "collect_hardware_fixture.py"
+  },
+  "lshw": {
+    "available": true,
+    "data": {
+      "id": "lenovo-h200-1",
+      "class": "system",
+      "vendor": "Lenovo",
+      "product": "ThinkSystem SR675 V3",
+      "serial": "J300L6NR",
+      "children": [
+        {
+          "id": "core",
+          "class": "bus",
+          "product": "SB27B93831",
+          "serial": "J30BF7A2003",
+          "children": [
+            {
+              "id": "cpu:0",
+              "class": "processor",
+              "product": "Intel Xeon Gold 6430",
+              "vendor": "Intel Corp.",
+              "slot": "CPU0",
+              "description": "CPU"
+            },
+            {
+              "id": "cpu:1",
+              "class": "processor",
+              "product": "Intel Xeon Gold 6430",
+              "vendor": "Intel Corp.",
+              "slot": "CPU1",
+              "description": "CPU"
+            },
+            {
+              "id": "cpu:2",
+              "class": "processor",
+              "product": "C62x Chipset QuickAssist Technology",
+              "vendor": "Intel Corp.",
+              "slot": "",
+              "description": "Co-processor"
+            },
+            {
+              "id": "cpu:3",
+              "class": "processor",
+              "product": "C62x Chipset QuickAssist Technology",
+              "vendor": "Intel Corp.",
+              "slot": "",
+              "description": "Co-processor"
+            },
+            {
+              "id": "cpu:4",
+              "class": "processor",
+              "product": "C62x Chipset QuickAssist Technology",
+              "vendor": "Intel Corp.",
+              "slot": "",
+              "description": "Co-processor"
+            },
+            {
+              "id": "cpu:5",
+              "class": "processor",
+              "product": "Intel Data Streaming Accelerator",
+              "vendor": "Intel Corp.",
+              "slot": "",
+              "description": "Co-processor"
+            },
+            {
+              "id": "memory",
+              "class": "memory",
+              "description": "System Memory",
+              "children": [
+                {
+                  "id": "bank:0",
+                  "class": "memory",
+                  "slot": "DIMM_P0_A0",
+                  "description": "DIMM DDR5 Synchronous 4800 MHz",
+                  "serial": "30AD8E10",
+                  "vendor": "Micron",
+                  "product": "MTC40F2046S1RC48BA1",
+                  "size": 34359738368
+                },
+                {
+                  "id": "bank:1",
+                  "class": "memory",
+                  "slot": "DIMM_P0_B0",
+                  "description": "DIMM DDR5 Synchronous 4800 MHz",
+                  "serial": "30AD8E11",
+                  "vendor": "Micron",
+                  "product": "MTC40F2046S1RC48BA1",
+                  "size": 34359738368
+                }
+              ]
+            },
+            {
+              "id": "pci:0",
+              "class": "bridge",
+              "description": "Host bridge",
+              "children": [
+                {
+                  "id": "pci:0:0",
+                  "class": "bridge",
+                  "description": "PCI bridge",
+                  "children": [
+                    {
+                      "id": "display:bmc",
+                      "class": "display",
+                      "product": "Matrox G200eW3",
+                      "vendor": "Matrox Electronics Systems Ltd.",
+                      "description": "VGA compatible controller"
+                    },
+                    {
+                      "id": "network:0",
+                      "class": "network",
+                      "product": "BCM57416 NetXtreme-E 10GBase-T",
+                      "vendor": "Broadcom Inc.",
+                      "logicalname": "eno1",
+                      "serial": "48:df:37:80:7a:d0",
+                      "description": "Ethernet interface"
+                    },
+                    {
+                      "id": "network:1",
+                      "class": "network",
+                      "product": "BCM57416 NetXtreme-E 10GBase-T",
+                      "vendor": "Broadcom Inc.",
+                      "logicalname": "eno2",
+                      "serial": "48:df:37:80:7a:d1",
+                      "description": "Ethernet interface"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "lsblk": {
+    "available": true,
+    "data": {
+      "blockdevices": [
+        {
+          "name": "nvme0n1",
+          "type": "disk",
+          "size": 960197124096,
+          "model": "Solidigm D7-P5520",
+          "serial": "BTAX3260001N3P4AGN",
+          "vendor": null,
+          "tran": "nvme",
+          "rota": "0",
+          "hctl": null,
+          "rev": "V1.0.0"
+        },
+        {
+          "name": "sda",
+          "type": "disk",
+          "size": 4000787030016,
+          "model": "ST4000NM000A-2HZ",
+          "serial": "WS20S2EH",
+          "vendor": "ATA     ",
+          "tran": "sas",
+          "rota": "1",
+          "hctl": "0:0:0:0",
+          "rev": "TN03"
+        },
+        {
+          "name": "loop0",
+          "type": "loop",
+          "size": 0,
+          "model": null,
+          "serial": null,
+          "vendor": null,
+          "tran": null,
+          "rota": "0",
+          "hctl": null,
+          "rev": null
+        }
+      ]
+    }
+  },
+  "nvme": {
+    "available": true,
+    "data": {
+      "Devices": [
+        {
+          "DevicePath": "/dev/nvme0n1",
+          "ModelNumber": "Solidigm D7-P5520",
+          "SerialNumber": "BTAX3260001N3P4AGN",
+          "Vendor": "Solidigm",
+          "PhysicalSize": 960197124096,
+          "Firmware": "V1.0.0"
+        }
+      ]
+    }
+  },
+  "nvidia": {
+    "available": false,
+    "error": "nvidia-smi not installed"
+  },
+  "lscpu": {
+    "available": true,
+    "data": {
+      "lscpu": [
+        {"field": "Architecture:", "data": "x86_64"},
+        {"field": "CPU(s):", "data": "64"},
+        {"field": "Socket(s):", "data": "2"},
+        {"field": "Core(s) per socket:", "data": "32"},
+        {"field": "Thread(s) per core:", "data": "1"},
+        {"field": "Model name:", "data": "Intel(R) Xeon(R) Gold 6430"},
+        {"field": "Vendor ID:", "data": "GenuineIntel"}
+      ]
+    }
+  },
+  "expected": {
+    "_comment": "Expected detection counts — CPUs should be 2 (not 6, QAT must be filtered)",
+    "cpus": 2,
+    "gpus": 0,
+    "dimms": 2,
+    "storage": 2,
+    "nics": 2,
+    "psus": 0,
+    "storage_interfaces": ["NVMe", "SAS"]
+  }
+}

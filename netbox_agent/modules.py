@@ -189,8 +189,199 @@ class ModuleManager:
             })
         return items
 
+    # Device names that are never physical storage
+    _SKIP_STORAGE_NAMES = {"loop", "ram", "zram", "dm-", "md", "nbd", "sr"}
+
     def _get_local_ssds(self):
-        """Detect SSDs via lshw storage + nvme-cli + RAID tools."""
+        """
+        Detect all physical storage devices via lsblk + nvme list.
+
+        Uses lsblk as the primary source (handles NVMe, SATA, SAS, USB).
+        Supplements NVMe devices with nvme-cli for firmware/vendor details.
+        Falls back to lshw if lsblk is unavailable.
+        """
+        lsblk_data = self._run_lsblk()
+        if lsblk_data is not None:
+            return self._parse_lsblk_storage(lsblk_data)
+        # Fallback: original lshw-based detection
+        return self._get_local_ssds_lshw_fallback()
+
+    def _run_lsblk(self):
+        """Run lsblk -J -b and return parsed JSON, or None on failure."""
+        if not is_tool("lsblk"):
+            logger.warning("lsblk not found — falling back to lshw for storage")
+            return None
+        try:
+            columns = "NAME,TYPE,SIZE,MODEL,SERIAL,VENDOR,TRAN,ROTA,HCTL,REV"
+            output = subprocess.check_output(
+                ["lsblk", "-J", "-b", "-o", columns],
+                encoding="utf-8",
+                timeout=30,
+            )
+            return json.loads(output)
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            # Try minimal columns (older kernels may not support all)
+            try:
+                output = subprocess.check_output(
+                    ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MODEL,SERIAL,VENDOR,TRAN,ROTA"],
+                    encoding="utf-8",
+                    timeout=30,
+                )
+                return json.loads(output)
+            except Exception:
+                logger.warning("lsblk failed: %s", e)
+                return None
+        except Exception as e:
+            logger.warning("lsblk failed: %s", e)
+            return None
+
+    def _run_nvme_list(self):
+        """Run nvme list -o json and return parsed data, or None on failure."""
+        if not is_tool("nvme"):
+            return None
+        try:
+            output = subprocess.check_output(
+                ["nvme", "list", "-o", "json"],
+                encoding="utf-8",
+                timeout=30,
+            )
+            return json.loads(output)
+        except Exception as e:
+            logger.debug("nvme list failed: %s", e)
+            return None
+
+    def _parse_lsblk_storage(self, lsblk_data):
+        """
+        Parse lsblk JSON output into storage items for NetBox modules.
+
+        Filters to physical disks only (TYPE=disk), excludes virtual/loop/ram
+        devices, and enriches NVMe entries with nvme-cli data.
+        """
+        items = []
+        seen_serials = set()
+
+        # Build NVMe lookup from nvme-cli for richer data
+        nvme_by_name = {}
+        nvme_data = self._run_nvme_list()
+        if nvme_data:
+            for dev in nvme_data.get("Devices", []):
+                dev_path = dev.get("DevicePath", "")
+                # /dev/nvme0n1 → nvme0n1
+                dev_name = dev_path.replace("/dev/", "")
+                nvme_by_name[dev_name] = dev
+
+        blockdevices = lsblk_data.get("blockdevices", [])
+        for blk in blockdevices:
+            dtype = (blk.get("type") or "").lower()
+            name = blk.get("name") or ""
+
+            # Only physical disks
+            if dtype != "disk":
+                continue
+
+            # Skip virtual/loop/ram/device-mapper
+            if any(name.startswith(prefix) for prefix in self._SKIP_STORAGE_NAMES):
+                continue
+
+            serial = (blk.get("serial") or "").strip() or None
+            model = (blk.get("model") or "").strip() or None
+            vendor = (blk.get("vendor") or "").strip() or None
+            tran = (blk.get("tran") or "").strip().lower()
+            rota = blk.get("rota")  # 0=SSD/NVMe, 1=HDD
+            size_bytes = blk.get("size")
+            rev = (blk.get("rev") or "").strip() or None
+
+            # Skip devices with no model AND no serial (virtual/unknown)
+            if not model and not serial:
+                continue
+
+            # Dedup by serial
+            if serial and serial in seen_serials:
+                continue
+            if serial:
+                seen_serials.add(serial)
+
+            # Enrich NVMe devices with nvme-cli data
+            nvme_info = nvme_by_name.get(name)
+            if nvme_info:
+                if not model:
+                    model = (nvme_info.get("ModelNumber") or "").strip() or None
+                if not serial:
+                    serial = (nvme_info.get("SerialNumber") or "").strip() or None
+                if not vendor:
+                    vendor = (nvme_info.get("Vendor") or nvme_info.get("Manufacturer") or "").strip() or None
+                if not size_bytes:
+                    size_bytes = nvme_info.get("PhysicalSize") or nvme_info.get("UsedBytes")
+                if not rev:
+                    rev = nvme_info.get("Firmware")
+
+            # Guess vendor from model if still unknown
+            if not vendor and model:
+                vendor = self._guess_vendor(model)
+
+            # Detect interface from TRAN field
+            interface = self._detect_storage_interface(tran, name)
+
+            # Build description from interface + rotational status
+            description = self._build_storage_description(interface, rota)
+
+            items.append({
+                "product": model or f"Unknown ({name})",
+                "vendor": vendor or "Unknown",
+                "serial": serial,
+                "description": description,
+                "interface": interface,
+                "size_bytes": int(size_bytes) if size_bytes else None,
+                "firmware": rev,
+                "name": name,
+            })
+
+        return items
+
+    def _detect_storage_interface(self, tran, name):
+        """
+        Detect storage interface from lsblk TRAN field and device name.
+        Informed by SILO's detect_storage_interface() logic.
+        """
+        if tran:
+            tran_map = {
+                "nvme": "NVMe",
+                "sata": "SATA",
+                "sas": "SAS",
+                "usb": "USB",
+                "ata": "SATA",
+                "fc": "FC",
+                "iscsi": "iSCSI",
+            }
+            if tran in tran_map:
+                return tran_map[tran]
+            return tran.upper()
+
+        # Infer from device name (fallback)
+        if name.startswith("nvme"):
+            return "NVMe"
+        if name.startswith("sd"):
+            return "SATA"  # Could be SAS, but SATA is more common
+        if name.startswith("hd"):
+            return "IDE"
+        return None
+
+    def _build_storage_description(self, interface, rota):
+        """Build a human-readable storage description."""
+        parts = []
+        if interface:
+            parts.append(interface)
+        if rota is not None:
+            if rota == "1" or rota is True or rota == 1:
+                parts.append("HDD")
+            else:
+                parts.append("SSD")
+        else:
+            parts.append("disk")
+        return " ".join(parts) if parts else "disk"
+
+    def _get_local_ssds_lshw_fallback(self):
+        """Original lshw-based storage detection (fallback when lsblk unavailable)."""
         items = []
         seen_serials = set()
 
@@ -199,7 +390,6 @@ class ModuleManager:
             product = disk.get("product")
             if not product:
                 continue
-            # Skip virtual/logical drives
             desc = (disk.get("description") or "").lower()
             if any(kw in desc for kw in ("volume", "virtual", "dvd-ram", "logical")):
                 continue
@@ -274,23 +464,43 @@ class ModuleManager:
 
         return items
 
+    # Vendor keywords → canonical name (checked in order, first match wins)
+    _VENDOR_KEYWORDS = (
+        ("solidigm", "Solidigm"),
+        ("samsung", "Samsung"),
+        ("intel", "Intel"),
+        ("micron", "Micron"),
+        ("western digital", "Western Digital"),
+        ("seagate", "Seagate"),
+        ("toshiba", "Toshiba"),
+        ("kioxia", "Kioxia"),
+        ("hynix", "SK Hynix"),
+        ("kingston", "Kingston"),
+        ("crucial", "Crucial"),
+        ("sandisk", "SanDisk"),
+        ("hgst", "HGST"),
+        ("hitachi", "Hitachi"),
+        ("liteon", "Lite-On"),
+        ("phison", "Phison"),
+    )
+
+    # Model number prefixes → vendor (for models that don't contain the vendor name)
+    _VENDOR_PREFIXES = (
+        ("st", "Seagate"),       # ST4000NM000A, ST8000NM000A
+        ("wdc ", "Western Digital"),  # WDC WD4003FFBX
+        ("wdc_", "Western Digital"),
+        ("wd", "Western Digital"),   # WD4003FFBX
+    )
+
     def _guess_vendor(self, product):
-        """Guess vendor from product name keywords."""
+        """Guess vendor from product/model name keywords and prefixes."""
         product_lower = product.lower()
-        vendors = {
-            "samsung": "Samsung",
-            "intel": "Intel",
-            "solidigm": "Solidigm",
-            "micron": "Micron",
-            "western": "Western Digital",
-            "seagate": "Seagate",
-            "toshiba": "Toshiba",
-            "hynix": "SK Hynix",
-            "kingston": "Kingston",
-            "crucial": "Crucial",
-        }
-        for keyword, name in vendors.items():
+        for keyword, name in self._VENDOR_KEYWORDS:
             if keyword in product_lower:
+                return name
+        # Check model number prefixes
+        for prefix, name in self._VENDOR_PREFIXES:
+            if product_lower.startswith(prefix):
                 return name
         return None
 

@@ -5,6 +5,7 @@ The netbox_agent.config module parses sys.argv at import time, so we must
 mock it before importing any netbox_agent modules.
 """
 
+import json
 import sys
 import re
 import pytest
@@ -203,7 +204,83 @@ class TestModuleManagerDetection:
         assert dimms[0]["serial"] == "ABC123"
         assert dimms[1]["serial"] is None
 
-    def test_get_local_ssds(self, mm, mock_lshw):
+    def test_get_local_ssds_lsblk(self, mm, mock_lshw):
+        """Storage detection via lsblk (primary path)."""
+        lsblk_data = {
+            "blockdevices": [
+                {"name": "nvme0n1", "type": "disk", "size": 3840755982336,
+                 "model": "D7-P5520", "serial": "SSD123", "vendor": None,
+                 "tran": "nvme", "rota": "0", "hctl": None, "rev": "V1.0"},
+                {"name": "sda", "type": "disk", "size": 960197124096,
+                 "model": "Samsung SSD 870", "serial": "SSD456", "vendor": "ATA",
+                 "tran": "sata", "rota": "0", "hctl": "0:0:0:0", "rev": "2B6Q"},
+                {"name": "sdb", "type": "disk", "size": 4000787030016,
+                 "model": "ST4000NM000A", "serial": "HDD789", "vendor": "ATA",
+                 "tran": "sata", "rota": "1", "hctl": "1:0:0:0", "rev": None},
+                {"name": "loop0", "type": "loop", "size": 0,
+                 "model": None, "serial": None, "vendor": None,
+                 "tran": None, "rota": "0", "hctl": None, "rev": None},
+                {"name": "dm-0", "type": "disk", "size": 107374182400,
+                 "model": None, "serial": None, "vendor": None,
+                 "tran": None, "rota": "0", "hctl": None, "rev": None},
+            ]
+        }
+
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
+             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+            mock_is_tool.side_effect = lambda t: t in ("lsblk",)
+            mock_subprocess.return_value = json.dumps(lsblk_data)
+            ssds = mm._get_local_ssds()
+
+        # Should find 3 physical disks (nvme, sata ssd, sata hdd)
+        # loop0 excluded (type=loop), dm-0 excluded (name starts with dm-)
+        assert len(ssds) == 3
+        assert ssds[0]["serial"] == "SSD123"
+        assert ssds[0]["interface"] == "NVMe"
+        assert ssds[0]["description"] == "NVMe SSD"
+        assert ssds[1]["serial"] == "SSD456"
+        assert ssds[1]["interface"] == "SATA"
+        assert ssds[1]["description"] == "SATA SSD"
+        assert ssds[2]["serial"] == "HDD789"
+        assert ssds[2]["interface"] == "SATA"
+        assert ssds[2]["description"] == "SATA HDD"
+
+    def test_get_local_ssds_lsblk_nvme_enrichment(self, mm, mock_lshw):
+        """NVMe devices should be enriched with nvme-cli data when available."""
+        lsblk_data = {
+            "blockdevices": [
+                {"name": "nvme0n1", "type": "disk", "size": 3840755982336,
+                 "model": "D7-P5520", "serial": "SSD-NVM1", "vendor": None,
+                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+            ]
+        }
+        nvme_data = {
+            "Devices": [
+                {"DevicePath": "/dev/nvme0n1", "ModelNumber": "Solidigm D7-P5520",
+                 "SerialNumber": "SSD-NVM1", "Vendor": "Solidigm",
+                 "PhysicalSize": 3840755982336, "Firmware": "V1.2.3"},
+            ]
+        }
+
+        call_count = [0]
+        def mock_check_output(cmd, **kwargs):
+            call_count[0] += 1
+            if "lsblk" in cmd:
+                return json.dumps(lsblk_data)
+            if "nvme" in cmd:
+                return json.dumps(nvme_data)
+            raise FileNotFoundError(cmd[0])
+
+        with patch("netbox_agent.modules.is_tool", return_value=True), \
+             patch("netbox_agent.modules.subprocess.check_output", side_effect=mock_check_output):
+            ssds = mm._get_local_ssds()
+
+        assert len(ssds) == 1
+        assert ssds[0]["vendor"] == "Solidigm"
+        assert ssds[0]["firmware"] == "V1.2.3"
+
+    def test_get_local_ssds_lshw_fallback(self, mm, mock_lshw):
+        """Falls back to lshw when lsblk is not available."""
         mock_lshw.get_hw_linux.return_value = [
             {"product": "D7-P5520", "vendor": "Solidigm", "serial": "SSD123",
              "description": "NVMe disk"},
@@ -212,9 +289,53 @@ class TestModuleManagerDetection:
             {"product": "Virtual disk", "vendor": None, "serial": "VD001",
              "description": "Virtual volume"},
         ]
-        ssds = mm._get_local_ssds()
+        with patch("netbox_agent.modules.is_tool", return_value=False):
+            ssds = mm._get_local_ssds()
         assert len(ssds) == 1
         assert ssds[0]["serial"] == "SSD123"
+
+    def test_get_local_ssds_dedup_serials(self, mm, mock_lshw):
+        """Duplicate serials should be deduplicated."""
+        lsblk_data = {
+            "blockdevices": [
+                {"name": "nvme0n1", "type": "disk", "size": 100000,
+                 "model": "TestDrive", "serial": "DUP-SERIAL", "vendor": "Test",
+                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+                {"name": "nvme1n1", "type": "disk", "size": 100000,
+                 "model": "TestDrive", "serial": "DUP-SERIAL", "vendor": "Test",
+                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+            ]
+        }
+
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
+             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+            mock_is_tool.side_effect = lambda t: t == "lsblk"
+            mock_subprocess.return_value = json.dumps(lsblk_data)
+            ssds = mm._get_local_ssds()
+
+        assert len(ssds) == 1
+
+    def test_get_local_ssds_vendor_guessing(self, mm, mock_lshw):
+        """Vendor should be guessed from model when not provided by lsblk."""
+        lsblk_data = {
+            "blockdevices": [
+                {"name": "nvme0n1", "type": "disk", "size": 100000,
+                 "model": "Samsung SSD 990 PRO", "serial": "S1", "vendor": None,
+                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+                {"name": "sda", "type": "disk", "size": 100000,
+                 "model": "Solidigm D7-PS1010", "serial": "S2", "vendor": None,
+                 "tran": "sata", "rota": "0", "hctl": None, "rev": None},
+            ]
+        }
+
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
+             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+            mock_is_tool.side_effect = lambda t: t == "lsblk"
+            mock_subprocess.return_value = json.dumps(lsblk_data)
+            ssds = mm._get_local_ssds()
+
+        assert ssds[0]["vendor"] == "Samsung"
+        assert ssds[1]["vendor"] == "Solidigm"
 
     def test_get_local_nics(self, mm, mock_lshw):
         mock_lshw.interfaces = [

@@ -1,0 +1,363 @@
+{
+  "system": {
+    "hostname": "gpu-server-01",
+    "kernel": "5.15.0-91-generic",
+    "arch": "x86_64",
+    "distro": "Ubuntu 22.04.3 LTS",
+    "collected_at": "2026-02-15T00:00:00+00:00",
+    "collected_by": "collect_hardware_fixture.py"
+  },
+  "lshw": {
+    "available": true,
+    "data": {
+      "id": "gpu-server-01",
+      "class": "system",
+      "vendor": "Supermicro",
+      "product": "AS-4125GS-TNRT",
+      "serial": "S424610X3303217",
+      "children": [
+        {
+          "id": "core",
+          "class": "bus",
+          "product": "H13DSG-OM",
+          "serial": "OM231S006543",
+          "children": [
+            {
+              "id": "cpu:0",
+              "class": "processor",
+              "product": "AMD EPYC 9454 48-Core Processor",
+              "vendor": "Advanced Micro Devices [AMD]",
+              "slot": "CPU0",
+              "description": "CPU"
+            },
+            {
+              "id": "cpu:1",
+              "class": "processor",
+              "product": "AMD EPYC 9454 48-Core Processor",
+              "vendor": "Advanced Micro Devices [AMD]",
+              "slot": "CPU1",
+              "description": "CPU"
+            },
+            {
+              "id": "memory",
+              "class": "memory",
+              "description": "System Memory",
+              "children": [
+                {
+                  "id": "bank:0",
+                  "class": "memory",
+                  "slot": "DIMM_P0_A0",
+                  "description": "DIMM DDR5 Synchronous 4800 MHz",
+                  "serial": "40AD9E50",
+                  "vendor": "Samsung",
+                  "product": "M321R8GA0BB0-CQKZJ",
+                  "size": 68719476736
+                },
+                {
+                  "id": "bank:1",
+                  "class": "memory",
+                  "slot": "DIMM_P0_A1",
+                  "description": "DIMM DDR5 Synchronous 4800 MHz",
+                  "serial": "40AD9E51",
+                  "vendor": "Samsung",
+                  "product": "M321R8GA0BB0-CQKZJ",
+                  "size": 68719476736
+                },
+                {
+                  "id": "bank:2",
+                  "class": "memory",
+                  "slot": "DIMM_P0_B0",
+                  "description": "DIMM DDR5 Synchronous 4800 MHz",
+                  "serial": "40AD9E52",
+                  "vendor": "Samsung",
+                  "product": "M321R8GA0BB0-CQKZJ",
+                  "size": 68719476736
+                },
+                {
+                  "id": "bank:3",
+                  "class": "memory",
+                  "slot": "DIMM_P0_B1",
+                  "description": "DIMM DDR5 Synchronous 4800 MHz",
+                  "serial": "40AD9E53",
+                  "vendor": "Samsung",
+                  "product": "M321R8GA0BB0-CQKZJ",
+                  "size": 68719476736
+                }
+              ]
+            },
+            {
+              "id": "pci:0",
+              "class": "bridge",
+              "description": "Host bridge",
+              "children": [
+                {
+                  "id": "pci:0:0",
+                  "class": "bridge",
+                  "description": "PCI bridge",
+                  "children": [
+                    {
+                      "id": "display:0",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:1",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:2",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:3",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:4",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:5",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:6",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    },
+                    {
+                      "id": "display:7",
+                      "class": "display",
+                      "product": "NVIDIA H100 80GB HBM3",
+                      "vendor": "NVIDIA Corporation",
+                      "description": "3D controller"
+                    }
+                  ]
+                },
+                {
+                  "id": "pci:0:1",
+                  "class": "bridge",
+                  "description": "PCI bridge",
+                  "children": [
+                    {
+                      "id": "display:bmc",
+                      "class": "display",
+                      "product": "ASPEED Graphics Family",
+                      "vendor": "ASPEED Technology, Inc.",
+                      "description": "VGA compatible controller"
+                    }
+                  ]
+                },
+                {
+                  "id": "pci:0:2",
+                  "class": "bridge",
+                  "description": "PCI bridge",
+                  "children": [
+                    {
+                      "id": "network:0",
+                      "class": "network",
+                      "product": "Ethernet Controller E810-XXV for SFP",
+                      "vendor": "Intel Corporation",
+                      "logicalname": "eno1",
+                      "serial": "b4:96:91:a4:1c:50",
+                      "description": "Ethernet interface"
+                    },
+                    {
+                      "id": "network:1",
+                      "class": "network",
+                      "product": "Ethernet Controller E810-XXV for SFP",
+                      "vendor": "Intel Corporation",
+                      "logicalname": "eno2",
+                      "serial": "b4:96:91:a4:1c:51",
+                      "description": "Ethernet interface"
+                    }
+                  ]
+                },
+                {
+                  "id": "storage:0",
+                  "class": "storage",
+                  "description": "Non-Volatile memory controller",
+                  "configuration": {
+                    "driver": "nvme"
+                  },
+                  "children": [
+                    {
+                      "id": "nvme0",
+                      "class": "disk",
+                      "product": "Solidigm D7-P5520",
+                      "serial": "BTAX3260001P3P8AGN",
+                      "logicalname": "/dev/nvme0n1",
+                      "size": 3840755982336,
+                      "description": "NVMe disk"
+                    },
+                    {
+                      "id": "nvme1",
+                      "class": "disk",
+                      "product": "Solidigm D7-P5520",
+                      "serial": "BTAX3260001P3P8BGN",
+                      "logicalname": "/dev/nvme1n1",
+                      "size": 3840755982336,
+                      "description": "NVMe disk"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "power:0",
+          "class": "power"
+        },
+        {
+          "id": "power:1",
+          "class": "power"
+        }
+      ]
+    }
+  },
+  "lsblk": {
+    "available": true,
+    "data": {
+      "blockdevices": [
+        {
+          "name": "nvme0n1",
+          "type": "disk",
+          "size": 3840755982336,
+          "model": "D7-P5520",
+          "serial": "BTAX3260001P3P8AGN",
+          "vendor": null,
+          "tran": "nvme",
+          "rota": "0",
+          "hctl": null,
+          "rev": "V1.0.0"
+        },
+        {
+          "name": "nvme1n1",
+          "type": "disk",
+          "size": 3840755982336,
+          "model": "D7-P5520",
+          "serial": "BTAX3260001P3P8BGN",
+          "vendor": null,
+          "tran": "nvme",
+          "rota": "0",
+          "hctl": null,
+          "rev": "V1.0.0"
+        },
+        {
+          "name": "nvme0n1p1",
+          "type": "part",
+          "size": 536870912,
+          "model": null,
+          "serial": null,
+          "vendor": null,
+          "tran": null,
+          "rota": "0",
+          "hctl": null,
+          "rev": null
+        },
+        {
+          "name": "loop0",
+          "type": "loop",
+          "size": 62914560,
+          "model": null,
+          "serial": null,
+          "vendor": null,
+          "tran": null,
+          "rota": "0",
+          "hctl": null,
+          "rev": null
+        }
+      ]
+    }
+  },
+  "nvme": {
+    "available": true,
+    "data": {
+      "Devices": [
+        {
+          "DevicePath": "/dev/nvme0n1",
+          "ModelNumber": "Solidigm D7-P5520",
+          "SerialNumber": "BTAX3260001P3P8AGN",
+          "Vendor": "Solidigm",
+          "PhysicalSize": 3840755982336,
+          "Firmware": "V1.0.0",
+          "UsedBytes": 512000000000
+        },
+        {
+          "DevicePath": "/dev/nvme1n1",
+          "ModelNumber": "Solidigm D7-P5520",
+          "SerialNumber": "BTAX3260001P3P8BGN",
+          "Vendor": "Solidigm",
+          "PhysicalSize": 3840755982336,
+          "Firmware": "V1.0.0",
+          "UsedBytes": 256000000000
+        }
+      ]
+    }
+  },
+  "nvidia": {
+    "available": true,
+    "query_csv": "0, 1324821038475\n1, 1324821038476\n2, 1324821038477\n3, 1324821038478\n4, 1324821038479\n5, 1324821038480\n6, 1324821038481\n7, 1324821038482"
+  },
+  "lscpu": {
+    "available": true,
+    "data": {
+      "lscpu": [
+        {"field": "Architecture:", "data": "x86_64"},
+        {"field": "CPU(s):", "data": "192"},
+        {"field": "Socket(s):", "data": "2"},
+        {"field": "Core(s) per socket:", "data": "48"},
+        {"field": "Thread(s) per core:", "data": "2"},
+        {"field": "Model name:", "data": "AMD EPYC 9454 48-Core Processor"},
+        {"field": "Vendor ID:", "data": "AuthenticAMD"},
+        {"field": "CPU MHz:", "data": "2750.000"},
+        {"field": "CPU max MHz:", "data": "3810.0000"},
+        {"field": "L1d cache:", "data": "3M"},
+        {"field": "L1i cache:", "data": "3M"},
+        {"field": "L2 cache:", "data": "96M"},
+        {"field": "L3 cache:", "data": "512M"}
+      ]
+    }
+  },
+  "dmidecode": {
+    "available": true,
+    "by_type": {
+      "power_supply": {
+        "type_id": 39,
+        "output": "# dmidecode 3.4\nHandle 0x0027, DMI type 39, 22 bytes\nSystem Power Supply\n\tName: PWS-2K04A-1R\n\tManufacturer: Supermicro\n\tSerial Number: P2K04A00BX10339\n\nHandle 0x0028, DMI type 39, 22 bytes\nSystem Power Supply\n\tName: PWS-2K04A-1R\n\tManufacturer: Supermicro\n\tSerial Number: P2K04A00BX10340\n",
+        "error": null
+      }
+    }
+  },
+  "expected": {
+    "_comment": "Expected detection counts for validation",
+    "cpus": 2,
+    "gpus": 8,
+    "dimms": 4,
+    "storage": 2,
+    "nics": 2,
+    "psus": 2,
+    "gpu_serials": ["1324821038475", "1324821038476", "1324821038477", "1324821038478", "1324821038479", "1324821038480", "1324821038481", "1324821038482"],
+    "storage_interfaces": ["NVMe", "NVMe"]
+  }
+}
