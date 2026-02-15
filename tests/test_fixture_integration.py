@@ -172,7 +172,7 @@ class TestLSHWFixtureParsing:
 
     @pytest.mark.parametrize("fixture_name", fixture_files)
     def test_cpu_count_matches_expected(self, fixture_name):
-        """CPU count from lshw should match expected (QAT filtered)."""
+        """CPU count should match expected. Uses lscpu if available, lshw fallback."""
         fixture = _load_fixture(fixture_name)
         expected = fixture.get("expected", {})
         if "cpus" not in expected:
@@ -183,7 +183,24 @@ class TestLSHWFixtureParsing:
             pytest.skip("No lshw data in fixture")
 
         mm = _build_module_manager(fixture, lshw)
-        cpus = mm._get_local_cpus()
+
+        lscpu_data = fixture.get("lscpu", {})
+        if lscpu_data.get("available") and "data" in lscpu_data:
+            # Primary path: mock lscpu
+            def mock_check_output(cmd, **kwargs):
+                if isinstance(cmd, list) and "lscpu" in cmd:
+                    return json.dumps(lscpu_data["data"])
+                raise FileNotFoundError(str(cmd))
+
+            with patch("netbox_agent.modules.is_tool", return_value=True), \
+                 patch("netbox_agent.modules.subprocess.check_output",
+                       side_effect=mock_check_output):
+                cpus = mm._get_local_cpus()
+        else:
+            # Fallback: lshw only
+            with patch("netbox_agent.modules.is_tool", return_value=False):
+                cpus = mm._get_local_cpus()
+
         assert len(cpus) == expected["cpus"], \
             f"Expected {expected['cpus']} CPUs, got {len(cpus)}: {[c['product'] for c in cpus]}"
 

@@ -78,30 +78,105 @@ class ModuleManager:
     #  Hardware Detection
     # ------------------------------------------------------------------ #
 
-    # Co-processor / accelerator keywords that lshw reports as class "processor"
-    # but are NOT physical CPUs (e.g., Intel QAT, DLB, IAA).
-    _SKIP_CPU_KEYWORDS = {
-        "quickassist", "qat", "dlb", "iaa", "dsa",
-        "co-processor", "coprocessor", "accelerator",
-    }
+    # Vendor ID normalization (from SILO cpu.py)
+    _INTEL_ALIASES = {"genuineintel", "intel", "intel(r) corporation", "intel corporation", "intel corp."}
+    _AMD_ALIASES = {"authenticamd", "advanced micro devices", "amd", "advanced micro devices [amd]"}
+
+    def _normalize_cpu_vendor(self, vendor_id):
+        """Normalize CPU vendor string. Informed by SILO's normalize_cpu_make()."""
+        if not vendor_id:
+            return "Unknown"
+        normalized = vendor_id.strip().lower()
+        if normalized in self._INTEL_ALIASES:
+            return "Intel"
+        if normalized in self._AMD_ALIASES:
+            return "AMD"
+        return vendor_id.strip()
 
     def _get_local_cpus(self):
-        """Detect CPUs via lshw. Filters out QAT and other co-processors."""
+        """
+        Detect CPUs via lscpu (primary) or lshw (fallback).
+
+        Uses lscpu -J as the primary source — it only reports actual CPU
+        sockets, never QAT/DLB/IAA/DSA accelerators. Informed by SILO's
+        cpu.py parser which uses the same approach.
+        """
+        lscpu_data = self._run_lscpu()
+        if lscpu_data is not None:
+            return self._parse_lscpu(lscpu_data)
+        # Fallback to lshw (less reliable — includes accelerators as "processor")
+        logger.warning("lscpu not available, falling back to lshw for CPU detection")
+        return self._get_local_cpus_lshw_fallback()
+
+    def _run_lscpu(self):
+        """Run lscpu -J and return parsed JSON, or None on failure."""
+        if not is_tool("lscpu"):
+            return None
+        try:
+            output = subprocess.check_output(
+                ["lscpu", "-J"],
+                encoding="utf-8",
+                timeout=30,
+            )
+            return json.loads(output)
+        except Exception as e:
+            logger.warning("lscpu -J failed: %s", e)
+            return None
+
+    def _parse_lscpu(self, lscpu_data):
+        """
+        Parse lscpu -J output into CPU items for NetBox modules.
+        Informed by SILO's cpu.py parse() function.
+        """
+        # Build field lookup from lscpu entries
+        fields = {}
+        for entry in lscpu_data.get("lscpu", []):
+            field_raw = (entry.get("field") or "").strip()
+            if field_raw.endswith(":"):
+                field_raw = field_raw[:-1].strip()
+            if field_raw:
+                fields[field_raw] = entry.get("data")
+
+        sockets = int(fields.get("Socket(s)", 0) or 0)
+        model = fields.get("Model name") or fields.get("Model") or "Unknown CPU"
+        vendor_id = fields.get("Vendor ID") or fields.get("Vendor") or "Unknown"
+        vendor = self._normalize_cpu_vendor(vendor_id)
+
+        if sockets < 1:
+            sockets = 1
+
+        items = []
+        for i in range(sockets):
+            items.append({
+                "product": model.strip(),
+                "vendor": vendor,
+                "serial": None,  # CPUs don't report serials
+                "slot": f"CPU{i}",
+            })
+        return items
+
+    def _get_local_cpus_lshw_fallback(self):
+        """Fallback CPU detection via lshw (used only when lscpu unavailable)."""
         items = []
         for cpu in self.lshw.get_hw_linux("cpu"):
             product = cpu.get("product", "Unknown CPU")
+            vendor = cpu.get("vendor", "Unknown")
             description = cpu.get("description", "")
 
-            # Skip co-processors: Intel QAT, DLB, IAA etc. show as class=processor
+            # Basic filtering for lshw fallback — skip obvious accelerators
             combined = f"{product} {description}".lower()
-            if any(kw in combined for kw in self._SKIP_CPU_KEYWORDS):
-                logger.debug("Skipping co-processor: %s (%s)", product, description)
+            skip_keywords = {"qat", "quickassist", "dlb", "iaa", "dsa",
+                             "co-processor", "coprocessor", "accelerator", "4xxx"}
+            if any(kw in combined for kw in skip_keywords):
+                continue
+            # Skip entries where product is just a vendor name
+            if product.lower().strip() in self._INTEL_ALIASES | self._AMD_ALIASES:
                 continue
 
             items.append({
                 "product": product,
-                "vendor": cpu.get("vendor", "Unknown"),
-                "serial": None,  # CPUs rarely report serials
+                "vendor": self._normalize_cpu_vendor(vendor),
+                "serial": None,
                 "slot": cpu.get("location", ""),
             })
         return items

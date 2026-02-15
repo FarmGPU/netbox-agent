@@ -130,44 +130,76 @@ def mm(mock_server, mock_lshw):
 
 class TestModuleManagerDetection:
 
-    def test_get_local_cpus(self, mm, mock_lshw):
-        mock_lshw.get_hw_linux.return_value = [
-            {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU0"},
-            {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU1"},
-        ]
-        cpus = mm._get_local_cpus()
+    def test_get_local_cpus_lscpu(self, mm, mock_lshw):
+        """CPU detection via lscpu (primary path, informed by SILO cpu.py)."""
+        lscpu_data = {
+            "lscpu": [
+                {"field": "Architecture:", "data": "x86_64"},
+                {"field": "Socket(s):", "data": "2"},
+                {"field": "Model name:", "data": "Intel(R) Xeon(R) Gold 6430"},
+                {"field": "Vendor ID:", "data": "GenuineIntel"},
+                {"field": "Core(s) per socket:", "data": "32"},
+                {"field": "Thread(s) per core:", "data": "2"},
+            ]
+        }
+        with patch("netbox_agent.modules.is_tool", return_value=True), \
+             patch("netbox_agent.modules.subprocess.check_output",
+                   return_value=json.dumps(lscpu_data)):
+            cpus = mm._get_local_cpus()
         assert len(cpus) == 2
-        assert cpus[0]["product"] == "Xeon Gold 6430"
-        assert cpus[0]["vendor"] == "Intel"
+        assert cpus[0]["product"] == "Intel(R) Xeon(R) Gold 6430"
+        assert cpus[0]["vendor"] == "Intel"  # normalized from GenuineIntel
         assert cpus[0]["serial"] is None
+        assert cpus[1]["slot"] == "CPU1"
 
-    def test_get_local_cpus_filters_qat(self, mm, mock_lshw):
-        """Intel QAT/co-processor devices must be excluded from CPU count."""
+    def test_get_local_cpus_lscpu_amd(self, mm, mock_lshw):
+        """AMD CPUs detected via lscpu with vendor normalization."""
+        lscpu_data = {
+            "lscpu": [
+                {"field": "Socket(s):", "data": "2"},
+                {"field": "Model name:", "data": "AMD EPYC 9454 48-Core Processor"},
+                {"field": "Vendor ID:", "data": "AuthenticAMD"},
+            ]
+        }
+        with patch("netbox_agent.modules.is_tool", return_value=True), \
+             patch("netbox_agent.modules.subprocess.check_output",
+                   return_value=json.dumps(lscpu_data)):
+            cpus = mm._get_local_cpus()
+        assert len(cpus) == 2
+        assert cpus[0]["vendor"] == "AMD"  # normalized from AuthenticAMD
+        assert "EPYC 9454" in cpus[0]["product"]
+
+    def test_get_local_cpus_lscpu_no_qat(self, mm, mock_lshw):
+        """lscpu never includes QAT/accelerators — only real CPU sockets."""
+        lscpu_data = {
+            "lscpu": [
+                {"field": "Socket(s):", "data": "2"},
+                {"field": "Model name:", "data": "Intel(R) Xeon(R) 6760P"},
+                {"field": "Vendor ID:", "data": "GenuineIntel"},
+            ]
+        }
+        with patch("netbox_agent.modules.is_tool", return_value=True), \
+             patch("netbox_agent.modules.subprocess.check_output",
+                   return_value=json.dumps(lscpu_data)):
+            cpus = mm._get_local_cpus()
+        # lscpu reports exactly 2 sockets — no QAT noise
+        assert len(cpus) == 2
+        assert all(c["product"] == "Intel(R) Xeon(R) 6760P" for c in cpus)
+
+    def test_get_local_cpus_lshw_fallback_filters_qat(self, mm, mock_lshw):
+        """When lscpu unavailable, lshw fallback still filters QAT."""
         mock_lshw.get_hw_linux.return_value = [
             {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU0"},
             {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU1"},
             {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
              "description": "Co-processor", "location": ""},
-            {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
-             "description": "Co-processor", "location": ""},
-            {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
-             "description": "Co-processor", "location": ""},
+            {"product": "4xxx Series QAT", "vendor": "Intel Corporation", "description": ""},
+            {"product": "Intel Corporation", "vendor": "Intel Corporation", "description": ""},
         ]
-        cpus = mm._get_local_cpus()
+        with patch("netbox_agent.modules.is_tool", return_value=False):
+            cpus = mm._get_local_cpus()
         assert len(cpus) == 2
         assert all(c["product"] == "Xeon Gold 6430" for c in cpus)
-
-    def test_get_local_cpus_filters_accelerators(self, mm, mock_lshw):
-        """DLB, IAA, and DSA accelerators must be excluded from CPU count."""
-        mock_lshw.get_hw_linux.return_value = [
-            {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU0"},
-            {"product": "DLB accelerator", "vendor": "Intel", "description": "Co-processor"},
-            {"product": "IAA accelerator", "vendor": "Intel", "description": "Co-processor"},
-            {"product": "DSA accelerator", "vendor": "Intel", "description": "Co-processor"},
-        ]
-        cpus = mm._get_local_cpus()
-        assert len(cpus) == 1
-        assert cpus[0]["product"] == "Xeon Gold 6430"
 
     def test_get_local_gpus_no_nvidia_smi(self, mm, mock_lshw):
         mock_lshw.get_hw_linux.return_value = [
