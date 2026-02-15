@@ -317,6 +317,35 @@ class ServerBase:
         new_server = nb.dcim.devices.create(**create_kwargs)
         return new_server
 
+    def _ensure_required_custom_fields(self, server, config):
+        """
+        Ensure required custom fields have values on existing devices.
+        NetBox validates ALL required CFs on any PATCH, so we must fill
+        missing ones before any save() call succeeds.
+        """
+        cf = dict(server.custom_fields or {})
+        changed = False
+        default_owner = getattr(config.device, "default_owner", "FarmGPU")
+
+        if not cf.get("owner"):
+            cf["owner"] = default_owner
+            changed = True
+        if not cf.get("environment"):
+            cf["environment"] = "Production"
+            changed = True
+        if not cf.get("record_completeness"):
+            cf["record_completeness"] = "incomplete"
+            changed = True
+
+        if changed:
+            logging.info(
+                "Backfilling required custom fields on '%s': %s",
+                server.name,
+                {k: cf[k] for k in ("owner", "environment", "record_completeness")},
+            )
+            server.custom_fields = cf
+            server.save()
+
     def get_asset_tag(self):
         """
         Read asset tag from config command, IPMI FRU, or DMI chassis.
@@ -492,6 +521,11 @@ class ServerBase:
             server = nb.dcim.devices.get(serial=self.get_service_tag())
             if not server:
                 server = self._netbox_create_server(datacenter, tenant, rack)
+
+        # Ensure required custom fields are populated on existing devices.
+        # NetBox validates ALL required CFs on any PATCH, so we must fill
+        # them before saving any field (e.g., asset_tag).
+        self._ensure_required_custom_fields(server, config)
 
         # Sync asset tag: if BIOS has one and NetBox doesn't, push it
         local_asset_tag = self.get_asset_tag()
