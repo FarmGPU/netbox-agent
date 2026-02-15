@@ -66,6 +66,7 @@ class ModuleManager:
         self.config = config
         self.lshw = LSHW()
         self.device = None  # NetBox device record, set during sync
+        self.default_owner = getattr(config.device, "default_owner", "FarmGPU")
 
         # Caches to reduce API calls
         self._profile_cache = {}
@@ -89,23 +90,44 @@ class ModuleManager:
             })
         return items
 
+    # BMC/onboard VGA controllers that should NOT be tracked as GPU modules
+    _SKIP_GPU_VENDORS = {"aspeed technology, inc.", "matrox electronics systems ltd."}
+    _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
+
     def _get_local_gpus(self):
-        """Detect GPUs via lshw + nvidia-smi for serials."""
+        """Detect GPUs via lshw + nvidia-smi for serials. Filters out BMC VGA controllers."""
         gpus = self.lshw.get_hw_linux("gpu")
         serials = self._get_nvidia_serials()
         items = []
-        for i, gpu in enumerate(gpus):
+        real_idx = 0  # index into nvidia-smi serials (only real GPUs)
+        for gpu in gpus:
             product = gpu.get("product", "Unknown GPU")
+            vendor = gpu.get("vendor", "Unknown")
+            description = gpu.get("description", "")
+
+            # Skip BMC/onboard VGA controllers
+            if vendor.lower() in self._SKIP_GPU_VENDORS:
+                logger.debug("Skipping onboard VGA: %s %s", vendor, product)
+                continue
+            if any(kw in product.lower() for kw in self._SKIP_GPU_KEYWORDS):
+                logger.debug("Skipping onboard VGA: %s", product)
+                continue
+            # Skip if description says "VGA compatible" and not "3D" (onboard vs discrete)
+            if "VGA compatible" in description and "3D" not in description:
+                logger.debug("Skipping VGA-only device: %s %s", vendor, product)
+                continue
+
             # Truncate long product names
             if len(product) > 50:
                 product = product[:48] + ".."
-            serial = serials.get(i)
+            serial = serials.get(real_idx)
             items.append({
                 "product": product,
-                "vendor": gpu.get("vendor", "Unknown"),
+                "vendor": vendor,
                 "serial": serial,
-                "description": gpu.get("description", ""),
+                "description": description,
             })
+            real_idx += 1
         return items
 
     def _get_nvidia_serials(self):
@@ -327,6 +349,13 @@ class ModuleManager:
         logger.info("Auto-created module type '%s / %s' (profile=%s)", vendor, product, profile_name)
         self._module_type_cache[cache_key] = mt
         return mt
+
+    def _default_module_custom_fields(self):
+        """Return custom_fields dict for new module creation."""
+        return {
+            "owner": self.default_owner,
+            "record_completeness": "incomplete",
+        }
 
     # ------------------------------------------------------------------ #
     #  Module Bay Management
@@ -566,6 +595,7 @@ class ModuleManager:
                     "module_type": module_type.id,
                     "serial": serial,
                     "status": "active",
+                    "custom_fields": self._default_module_custom_fields(),
                 })
                 matched_module_ids.add(new_mod.id)
                 logger.info(
@@ -594,6 +624,7 @@ class ModuleManager:
                         "module_bay": bay.id,
                         "module_type": module_type.id,
                         "status": "active",
+                        "custom_fields": self._default_module_custom_fields(),
                     })
                     matched_module_ids.add(new_mod.id)
                     logger.info(
