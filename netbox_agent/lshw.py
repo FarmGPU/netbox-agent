@@ -174,23 +174,35 @@ class LSHW:
             self.gpus.append(infos)
 
     def walk_bridge(self, obj):
+        """Recursively walk PCI bridge tree to find all devices."""
         if "children" not in obj:
             return
 
-        for bus in obj["children"]:
-            if bus["class"] == "storage":
-                self.find_storage(bus)
-            if bus["class"] == "display":
-                self.find_gpus(bus)
+        for child in obj["children"]:
+            cls = child.get("class", "")
+            if cls == "storage":
+                self.find_storage(child)
+            elif cls == "network":
+                self.find_network(child)
+            elif cls == "display":
+                self.find_gpus(child)
+            elif cls == "bridge":
+                self.walk_bridge(child)
 
-            if "children" in bus:
-                for b in bus["children"]:
-                    if b["class"] == "storage":
-                        self.find_storage(b)
-                    if b["class"] == "network":
-                        self.find_network(b)
-                    if b["class"] == "display":
-                        self.find_gpus(b)
+            # Also walk children of non-bridge nodes (e.g., storage controllers
+            # with child disks are handled by find_storage, but multi-function
+            # PCI devices may have network children under a storage parent).
+            if cls not in ("bridge",) and "children" in child:
+                for grandchild in child["children"]:
+                    gc_cls = grandchild.get("class", "")
+                    if gc_cls == "storage":
+                        self.find_storage(grandchild)
+                    elif gc_cls == "network":
+                        self.find_network(grandchild)
+                    elif gc_cls == "display":
+                        self.find_gpus(grandchild)
+                    elif gc_cls == "bridge":
+                        self.walk_bridge(grandchild)
 
 
 if __name__ == "__main__":

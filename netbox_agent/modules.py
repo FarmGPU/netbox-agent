@@ -78,12 +78,28 @@ class ModuleManager:
     #  Hardware Detection
     # ------------------------------------------------------------------ #
 
+    # Co-processor / accelerator keywords that lshw reports as class "processor"
+    # but are NOT physical CPUs (e.g., Intel QAT, DLB, IAA).
+    _SKIP_CPU_KEYWORDS = {
+        "quickassist", "qat", "dlb", "iaa", "dsa",
+        "co-processor", "coprocessor", "accelerator",
+    }
+
     def _get_local_cpus(self):
-        """Detect CPUs via lshw. Returns list of dicts with product, vendor, slot."""
+        """Detect CPUs via lshw. Filters out QAT and other co-processors."""
         items = []
         for cpu in self.lshw.get_hw_linux("cpu"):
+            product = cpu.get("product", "Unknown CPU")
+            description = cpu.get("description", "")
+
+            # Skip co-processors: Intel QAT, DLB, IAA etc. show as class=processor
+            combined = f"{product} {description}".lower()
+            if any(kw in combined for kw in self._SKIP_CPU_KEYWORDS):
+                logger.debug("Skipping co-processor: %s (%s)", product, description)
+                continue
+
             items.append({
-                "product": cpu.get("product", "Unknown CPU"),
+                "product": product,
                 "vendor": cpu.get("vendor", "Unknown"),
                 "serial": None,  # CPUs rarely report serials
                 "slot": cpu.get("location", ""),
@@ -236,7 +252,9 @@ class ModuleManager:
         try:
             from netbox_agent import dmidecode
             dmi = self.server.dmi
-            psus = dmidecode.get_by_type(dmi, "Power Supply") or []
+            # Use numeric type ID 39 because _str2type has " Power Supply"
+            # (with leading space), causing string lookup to fail.
+            psus = dmidecode.get_by_type(dmi, 39) or []
             for psu in psus:
                 name = psu.get("Name", "Unknown PSU")
                 serial = psu.get("Serial Number", "")

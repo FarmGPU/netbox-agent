@@ -140,6 +140,34 @@ class TestModuleManagerDetection:
         assert cpus[0]["vendor"] == "Intel"
         assert cpus[0]["serial"] is None
 
+    def test_get_local_cpus_filters_qat(self, mm, mock_lshw):
+        """Intel QAT/co-processor devices must be excluded from CPU count."""
+        mock_lshw.get_hw_linux.return_value = [
+            {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU0"},
+            {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU1"},
+            {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
+             "description": "Co-processor", "location": ""},
+            {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
+             "description": "Co-processor", "location": ""},
+            {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
+             "description": "Co-processor", "location": ""},
+        ]
+        cpus = mm._get_local_cpus()
+        assert len(cpus) == 2
+        assert all(c["product"] == "Xeon Gold 6430" for c in cpus)
+
+    def test_get_local_cpus_filters_accelerators(self, mm, mock_lshw):
+        """DLB, IAA, and DSA accelerators must be excluded from CPU count."""
+        mock_lshw.get_hw_linux.return_value = [
+            {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU0"},
+            {"product": "DLB accelerator", "vendor": "Intel", "description": "Co-processor"},
+            {"product": "IAA accelerator", "vendor": "Intel", "description": "Co-processor"},
+            {"product": "DSA accelerator", "vendor": "Intel", "description": "Co-processor"},
+        ]
+        cpus = mm._get_local_cpus()
+        assert len(cpus) == 1
+        assert cpus[0]["product"] == "Xeon Gold 6430"
+
     def test_get_local_gpus_no_nvidia_smi(self, mm, mock_lshw):
         mock_lshw.get_hw_linux.return_value = [
             {"product": "NVIDIA A100 80GB", "vendor": "NVIDIA", "description": "3D controller"},
@@ -199,6 +227,41 @@ class TestModuleManagerDetection:
         ]
         nics = mm._get_local_nics()
         assert len(nics) == 2
+
+    def test_get_local_psus(self, mm):
+        """PSU detection uses numeric DMI type 39 to avoid leading-space lookup bug."""
+        mock_dmi_data = {
+            "0x0027": {
+                "DMIType": 39,
+                "DMISize": 20,
+                "DMIName": "System Power Supply",
+                "Name": "PWS-2K04A-1R",
+                "Manufacturer": "Supermicro",
+                "Serial Number": "PSU-12345",
+            },
+            "0x0028": {
+                "DMIType": 39,
+                "DMISize": 20,
+                "DMIName": "System Power Supply",
+                "Name": "PWS-2K04A-1R",
+                "Manufacturer": "Supermicro",
+                "Serial Number": "PSU-12346",
+            },
+        }
+        mm.server.dmi = mock_dmi_data
+        # Patch at the module level since _get_local_psus does a local import
+        mock_dmidecode = MagicMock()
+        mock_dmidecode.get_by_type.return_value = [
+            {"Name": "PWS-2K04A-1R", "Manufacturer": "Supermicro", "Serial Number": "PSU-12345"},
+            {"Name": "PWS-2K04A-1R", "Manufacturer": "Supermicro", "Serial Number": "PSU-12346"},
+        ]
+        with patch.dict(sys.modules, {"netbox_agent.dmidecode": mock_dmidecode}):
+            psus = mm._get_local_psus()
+        assert len(psus) == 2
+        assert psus[0]["serial"] == "PSU-12345"
+        assert psus[1]["serial"] == "PSU-12346"
+        # Verify get_by_type was called with numeric 39, not string "Power Supply"
+        mock_dmidecode.get_by_type.assert_called_once_with(mm.server.dmi, 39)
 
     def test_gpu_product_truncation(self, mm, mock_lshw):
         long_name = "A" * 60
