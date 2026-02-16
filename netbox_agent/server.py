@@ -597,6 +597,16 @@ class ServerBase:
             server.name = self.get_hostname()
             update += 1
 
+        # Sync device serial from DMI (may be missing on pre-existing devices)
+        local_serial = self.get_service_tag()
+        if local_serial and server.serial != local_serial:
+            logging.info(
+                "Updating serial on '%s': %s -> %s",
+                server.name, server.serial, local_serial,
+            )
+            server.serial = local_serial
+            update += 1
+
         server_tags = sorted(set([x.name for x in server.tags]))
         tags = sorted(set(self.tags))
         if server_tags != tags:
@@ -608,8 +618,17 @@ class ServerBase:
                 server.tags = sorted(set(new_tags_ids + server_tags_ids))
             update += 1
 
-        if server.custom_fields != self.custom_fields:
-            server.custom_fields = self.custom_fields
+        # Populate chassis_serial and bmc_mac_address custom fields
+        local_cf = dict(self.custom_fields)
+        chassis_serial = self._get_chassis_serial()
+        if chassis_serial:
+            local_cf["chassis_serial"] = chassis_serial
+        bmc_mac = self._get_bmc_mac()
+        if bmc_mac:
+            local_cf["bmc_mac_address"] = bmc_mac
+
+        if server.custom_fields != local_cf:
+            server.custom_fields = local_cf
             update += 1
 
         if config.update_all or config.update_location:
@@ -667,6 +686,36 @@ class ServerBase:
             server.save()
 
         logging.debug("Finished updating Server!")
+
+    def _get_chassis_serial(self):
+        """
+        Return the chassis serial number from DMI data.
+        Distinct from the system serial (service tag) on many servers.
+        """
+        _PLACEHOLDERS = {
+            "", "none", "n/a", "not specified", "not available",
+            "to be filled by o.e.m.", "default string", "0123456789",
+            "..................",
+        }
+        try:
+            if self.chassis:
+                serial = self.chassis[0].get("Serial Number", "").strip()
+                if serial and serial.lower() not in _PLACEHOLDERS:
+                    return serial
+        except (IndexError, KeyError, AttributeError):
+            pass
+        return None
+
+    def _get_bmc_mac(self):
+        """Return the BMC MAC address from IPMI, if available."""
+        try:
+            from netbox_agent.ipmi import IPMI
+            ipmi_data = IPMI().parse()
+            if ipmi_data and ipmi_data.get("mac"):
+                return ipmi_data["mac"].upper()
+        except Exception:
+            pass
+        return None
 
     def _get_default_gateway_interface(self):
         """
