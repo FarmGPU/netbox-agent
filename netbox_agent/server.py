@@ -653,8 +653,23 @@ class ServerBase:
             if update:
                 expansion.save()
 
+        # Re-fetch IPs after network updates (IPs may have been added/removed)
         myips = list(nb.ipam.ip_addresses.filter(device_id=server.id))
+        # Build a set of currently assigned IP IDs for validation
+        assigned_ip_ids = {ip.id for ip in myips}
         update = 0
+
+        # Re-fetch the device to get current oob_ip/primary_ip4 state
+        server = nb.dcim.devices.get(server.id)
+
+        # Clear oob_ip if it points to an IP no longer assigned to this device
+        if server.oob_ip and server.oob_ip.id not in assigned_ip_ids:
+            logging.info(
+                "Clearing stale oob_ip %s (no longer assigned to device)",
+                server.oob_ip,
+            )
+            server.oob_ip = None
+            update += 1
 
         # Set oob_ip to the IPMI interface IP
         for ip in myips:
@@ -662,6 +677,15 @@ class ServerBase:
                 server.oob_ip = ip.id
                 update += 1
                 break
+
+        # Clear primary_ip4 if it points to an IP no longer assigned
+        if server.primary_ip4 and server.primary_ip4.id not in assigned_ip_ids:
+            logging.info(
+                "Clearing stale primary_ip4 %s (no longer assigned to device)",
+                server.primary_ip4,
+            )
+            server.primary_ip4 = None
+            update += 1
 
         # Set primary_ip4 to the management IP (default gateway interface)
         if not server.primary_ip4:
