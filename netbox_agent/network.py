@@ -291,6 +291,7 @@ class Network(object):
         return update, interface
 
     def update_interface_macs(self, nic, macs):
+        """Sync MAC address objects on an interface. Returns current MAC objects."""
         nb_macs = list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
         # Clean
         for nb_mac in nb_macs:
@@ -308,6 +309,8 @@ class Network(object):
                         "assigned_object_id": nic.id,
                     }
                 )
+        # Return current state for primary_mac_address assignment
+        return list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
 
     def create_netbox_nic(self, nic, mgmt=False):
         # TODO: add Optic Vendor, PN and Serial
@@ -517,13 +520,22 @@ class Network(object):
         for nic in self.nics:
             interface = self.get_netbox_network_card(nic)
 
+            # IPMI interface should be management-only
+            is_ipmi = nic.get("ipmi", False)
+
             if not interface:
                 logging.info(
                     "Interface {nic} not found, creating..".format(nic=self._nic_identifier(nic))
                 )
-                interface = self.create_netbox_nic(nic)
+                interface = self.create_netbox_nic(nic, mgmt=is_ipmi)
 
             nic_update = 0
+
+            # Ensure mgmt_only is correct (fix existing interfaces)
+            if is_ipmi and not interface.mgmt_only:
+                logging.info("Setting mgmt_only=True on IPMI interface")
+                interface.mgmt_only = True
+                nic_update += 1
 
             ret, interface = self.reset_vlan_on_interface(nic, interface)
             nic_update += ret
@@ -538,21 +550,34 @@ class Network(object):
                 nic_update += 1
 
             if version.parse(nb.version) >= version.parse("4.2"):
-                # Create MAC objects
+                # Sync MAC objects and set primary_mac_address (by ID)
                 if nic["mac"]:
-                    self.update_interface_macs(interface, [nic["mac"]])
-
-            if nic["mac"] and nic["mac"] != interface.mac_address:
-                logging.info(
-                    "Updating interface {interface} mac to: {mac}".format(
-                        interface=interface, mac=nic["mac"]
+                    mac_objs = self.update_interface_macs(interface, [nic["mac"]])
+                    # Find the MAC object matching nic["mac"] and set as primary
+                    primary_mac_id = None
+                    for mac_obj in (mac_objs or []):
+                        if mac_obj.mac_address and mac_obj.mac_address.upper() == nic["mac"].upper():
+                            primary_mac_id = mac_obj.id
+                            break
+                    current_primary = getattr(interface, "primary_mac_address", None)
+                    current_primary_id = current_primary.id if current_primary else None
+                    if primary_mac_id and primary_mac_id != current_primary_id:
+                        logging.info(
+                            "Setting primary MAC on {interface} to {mac}".format(
+                                interface=interface, mac=nic["mac"]
+                            )
+                        )
+                        interface.primary_mac_address = primary_mac_id
+                        nic_update += 1
+            else:
+                if nic["mac"] and nic["mac"] != interface.mac_address:
+                    logging.info(
+                        "Updating interface {interface} mac to: {mac}".format(
+                            interface=interface, mac=nic["mac"]
+                        )
                     )
-                )
-                if version.parse(nb.version) < version.parse("4.2"):
                     interface.mac_address = nic["mac"]
-                else:
-                    interface.primary_mac_address = {"mac_address": nic["mac"]}
-                nic_update += 1
+                    nic_update += 1
 
             if hasattr(interface, "mtu"):
                 if nic["mtu"] != interface.mtu:

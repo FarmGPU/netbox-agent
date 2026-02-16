@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 import logging
@@ -633,19 +634,63 @@ class ServerBase:
             if update:
                 expansion.save()
 
-        myips = nb.ipam.ip_addresses.filter(device_id=server.id)
+        myips = list(nb.ipam.ip_addresses.filter(device_id=server.id))
         update = 0
 
+        # Set oob_ip to the IPMI interface IP
         for ip in myips:
-            if ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
+            if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
                 server.oob_ip = ip.id
                 update += 1
                 break
+
+        # Set primary_ip4 to the management IP (default gateway interface)
+        if not server.primary_ip4:
+            mgmt_iface = self._get_default_gateway_interface()
+            if mgmt_iface:
+                for ip in myips:
+                    if (
+                        ip.assigned_object
+                        and ip.assigned_object.display == mgmt_iface
+                        and ip.family
+                        and ip.family.value == 4
+                    ):
+                        logging.info(
+                            "Setting primary_ip4 to %s (interface %s)",
+                            ip.address, mgmt_iface,
+                        )
+                        server.primary_ip4 = ip.id
+                        update += 1
+                        break
 
         if update:
             server.save()
 
         logging.debug("Finished updating Server!")
+
+    def _get_default_gateway_interface(self):
+        """
+        Detect the management interface by finding the default route.
+        Uses `ip -j route show default` (JSON output). The interface with
+        the default gateway is the management interface — same concept as
+        SILO's ansible_host (the IP used for SSH/management access).
+        Returns the interface name (e.g. "ens4035f0np0") or None.
+        """
+        try:
+            output = subprocess.check_output(
+                ["ip", "-j", "route", "show", "default"],
+                encoding="utf-8",
+                timeout=10,
+            )
+            routes = json.loads(output)
+            if routes and isinstance(routes, list):
+                dev = routes[0].get("dev")
+                if dev:
+                    logging.debug("Default gateway interface: %s", dev)
+                    return dev
+        except Exception as e:
+            logging.warning("Failed to detect default gateway interface: %s", e)
+        return None
 
     def print_debug(self):
         self.network = ServerNetwork(server=self)

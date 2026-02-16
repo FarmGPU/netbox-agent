@@ -13,11 +13,14 @@ Naming convention:
 Idempotent: skips templates and bays that already exist.
 """
 
+import re
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 from nb_connection import get_api, logger
+
+STANDARD_BAY_PATTERN = re.compile(r"^(CPU|GPU|DIMM|SSD|NIC|PSU)-\d+$")
 
 # Default bay counts per device type category
 # These are reasonable defaults; customize per device type as needed
@@ -52,12 +55,24 @@ def _get_bay_counts_for_type(device_type_model):
 
 
 def _ensure_module_bay_templates(nb, device_type):
-    """Add module bay templates to a device type, skipping those that already exist."""
+    """Add standard templates and remove legacy-named ones from a device type."""
     bay_counts = _get_bay_counts_for_type(device_type.model)
     existing_templates = list(nb.dcim.module_bay_templates.filter(device_type_id=device_type.id))
     existing_names = {t.name for t in existing_templates}
-    created = 0
 
+    # Remove legacy templates (names not matching CATEGORY-N convention)
+    deleted = 0
+    for t in existing_templates:
+        if not STANDARD_BAY_PATTERN.match(t.name):
+            logger.info(
+                "  Deleting legacy template '%s' from device type '%s'",
+                t.name, device_type.model,
+            )
+            t.delete()
+            deleted += 1
+
+    # Add standard templates
+    created = 0
     for category, count in bay_counts.items():
         for i in range(count):
             bay_name = f"{category}-{i}"
@@ -70,36 +85,44 @@ def _ensure_module_bay_templates(nb, device_type):
             })
             created += 1
 
-    if created > 0:
+    if created > 0 or deleted > 0:
         logger.info(
-            "Added %d module bay template(s) to device type '%s'",
-            created, device_type.model,
+            "Device type '%s': added %d, deleted %d legacy template(s)",
+            device_type.model, created, deleted,
         )
     else:
         logger.info("Device type '%s' — all bay templates present", device_type.model)
 
 
 def _backfill_device_module_bays(nb, device):
-    """Create module bays on an existing device matching its device type templates."""
+    """Create standard bays and remove empty legacy bays on an existing device."""
     templates = list(nb.dcim.module_bay_templates.filter(device_type_id=device.device_type.id))
-    if not templates:
-        return 0
 
     existing_bays = list(nb.dcim.module_bays.filter(device_id=device.id))
     existing_names = {b.name for b in existing_bays}
+
+    # Remove empty legacy bays
+    deleted = 0
+    for bay in existing_bays:
+        if not STANDARD_BAY_PATTERN.match(bay.name) and not bay.installed_module:
+            logger.info("  Deleting legacy bay '%s' on %s", bay.name, device.name)
+            bay.delete()
+            deleted += 1
+
+    # Add missing standard bays from templates
     created = 0
+    if templates:
+        for template in templates:
+            if template.name in existing_names:
+                continue
+            nb.dcim.module_bays.create({
+                "device": device.id,
+                "name": template.name,
+                "position": template.name,
+            })
+            created += 1
 
-    for template in templates:
-        if template.name in existing_names:
-            continue
-        nb.dcim.module_bays.create({
-            "device": device.id,
-            "name": template.name,
-            "position": template.name,
-        })
-        created += 1
-
-    return created
+    return created + deleted  # Return total changes for logging
 
 
 def run(nb):
@@ -114,14 +137,14 @@ def run(nb):
     devices = list(nb.dcim.devices.all())
     logger.info("Backfilling module bays on %d existing device(s)...", len(devices))
 
-    total_created = 0
+    total_changes = 0
     for device in devices:
-        created = _backfill_device_module_bays(nb, device)
-        if created > 0:
-            logger.info("  %s: created %d module bay(s)", device.name, created)
-            total_created += created
+        changes = _backfill_device_module_bays(nb, device)
+        if changes > 0:
+            logger.info("  %s: %d change(s)", device.name, changes)
+            total_changes += changes
 
-    logger.info("Backfill complete: %d total module bay(s) created", total_created)
+    logger.info("Backfill complete: %d total change(s)", total_changes)
 
 
 def main():
