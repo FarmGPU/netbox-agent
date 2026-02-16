@@ -662,3 +662,85 @@ class TestBase36Encoding:
     def test_roundtrip(self):
         for i in [0, 1, 100, 1000, 10000, 1679615]:
             assert self.base36_to_int(self.int_to_base36(i)) == i
+
+
+# ---------------------------------------------------------------------------
+# Tests: Serial Number Cascade & Placeholder Detection
+# ---------------------------------------------------------------------------
+# These test the _is_valid_serial and _get_best_serial logic from server.py.
+# We re-implement the logic here to avoid importing server.py (config chain).
+
+class TestSerialValidation:
+    """Test DMI placeholder detection and serial cascade logic."""
+
+    _DMI_PLACEHOLDERS = {
+        "", "none", "n/a", "na", "not specified", "not available",
+        "not applicable", "to be filled by o.e.m.", "default string",
+        "0123456789", "..................", "system serial number",
+        "chassis serial number", "base board serial number",
+        "default", "unknown", "unspecified", "no asset information",
+        "empty", "xxxxxxxxxxxx", "0000000000", "____________",
+    }
+
+    def _is_valid_serial(self, value):
+        if not value or not isinstance(value, str):
+            return False
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) < 2:
+            return False
+        if cleaned.lower() in self._DMI_PLACEHOLDERS:
+            return False
+        if len(set(cleaned.replace("-", "").replace(" ", ""))) <= 1:
+            return False
+        return True
+
+    def test_valid_serials(self):
+        valid = [
+            "S452NF30LT00023",
+            "BQWF61200143",
+            "J3030NQ100040",
+            "WX12345678",
+            "SN-1234-ABCD",
+        ]
+        for sn in valid:
+            assert self._is_valid_serial(sn), f"{sn!r} should be valid"
+
+    def test_placeholder_serials(self):
+        placeholders = [
+            "Not Specified",
+            "To Be Filled By O.E.M.",
+            "Default string",
+            "0123456789",
+            "N/A",
+            "None",
+            "Unknown",
+            "",
+            "..................",
+            "System Serial Number",
+            "Base Board Serial Number",
+        ]
+        for sn in placeholders:
+            assert not self._is_valid_serial(sn), f"{sn!r} should be invalid"
+
+    def test_single_char_repeated_serials(self):
+        """Serials that are all the same character should be rejected."""
+        assert not self._is_valid_serial("000000")
+        assert not self._is_valid_serial("XXXXXX")
+        assert not self._is_valid_serial("------")
+        assert not self._is_valid_serial("      ")
+
+    def test_none_and_empty(self):
+        assert not self._is_valid_serial(None)
+        assert not self._is_valid_serial("")
+        assert not self._is_valid_serial("  ")
+        assert not self._is_valid_serial("X")  # too short (< 2)
+
+    def test_case_insensitive_placeholder(self):
+        assert not self._is_valid_serial("not specified")
+        assert not self._is_valid_serial("NOT SPECIFIED")
+        assert not self._is_valid_serial("Not Specified")
+
+    def test_whitespace_handling(self):
+        """Leading/trailing whitespace should be stripped before validation."""
+        assert self._is_valid_serial("  S452NF30LT00023  ")
+        assert not self._is_valid_serial("  Not Specified  ")

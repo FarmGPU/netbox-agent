@@ -597,8 +597,8 @@ class ServerBase:
             server.name = self.get_hostname()
             update += 1
 
-        # Sync device serial from DMI (may be missing on pre-existing devices)
-        local_serial = self.get_service_tag()
+        # Sync device serial — cascade through multiple sources
+        local_serial = self._get_best_serial()
         if local_serial and server.serial != local_serial:
             logging.info(
                 "Updating serial on '%s': %s -> %s",
@@ -686,6 +686,104 @@ class ServerBase:
             server.save()
 
         logging.debug("Finished updating Server!")
+
+    # DMI placeholder values that should be treated as "no serial"
+    _DMI_PLACEHOLDERS = {
+        "", "none", "n/a", "na", "not specified", "not available",
+        "not applicable", "to be filled by o.e.m.", "default string",
+        "0123456789", "..................", "system serial number",
+        "chassis serial number", "base board serial number",
+        "default", "unknown", "unspecified", "no asset information",
+        "empty", "xxxxxxxxxxxx", "0000000000", "____________",
+    }
+
+    def _is_valid_serial(self, value):
+        """Check if a serial string is real (not a placeholder)."""
+        if not value or not isinstance(value, str):
+            return False
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) < 2:
+            return False
+        if cleaned.lower() in self._DMI_PLACEHOLDERS:
+            return False
+        # Reject strings that are all the same character (e.g. "000000", "XXXX")
+        if len(set(cleaned.replace("-", "").replace(" ", ""))) <= 1:
+            return False
+        return True
+
+    def _get_best_serial(self):
+        """
+        Cascade through multiple sources to find a valid device serial.
+        Order: vendor get_service_tag() → baseboard → system → IPMI FRU → UUID.
+        Filters out common DMI placeholder strings.
+        """
+        # 1. Vendor-specific logic (already has some fallbacks per vendor)
+        try:
+            tag = self.get_service_tag()
+            if self._is_valid_serial(tag):
+                return tag.strip()
+        except Exception:
+            pass
+
+        # 2. Baseboard serial (often the most reliable on Supermicro)
+        try:
+            if self.baseboard:
+                bb = self.baseboard[0].get("Serial Number", "").strip()
+                if self._is_valid_serial(bb):
+                    logging.info("Using baseboard serial as device serial: %s", bb)
+                    return bb
+        except (IndexError, KeyError, AttributeError):
+            pass
+
+        # 3. System serial (DMI type 1)
+        try:
+            if self.system:
+                sys_serial = self.system[0].get("Serial Number", "").strip()
+                if self._is_valid_serial(sys_serial):
+                    logging.info("Using system serial as device serial: %s", sys_serial)
+                    return sys_serial
+        except (IndexError, KeyError, AttributeError):
+            pass
+
+        # 4. Chassis serial (DMI type 3)
+        try:
+            if self.chassis:
+                ch = self.chassis[0].get("Serial Number", "").strip()
+                if self._is_valid_serial(ch):
+                    logging.info("Using chassis serial as device serial: %s", ch)
+                    return ch
+        except (IndexError, KeyError, AttributeError):
+            pass
+
+        # 5. IPMI FRU product serial
+        try:
+            output = subprocess.check_output(
+                ["ipmitool", "fru", "print", "0"],
+                encoding="utf-8", timeout=15, stderr=subprocess.DEVNULL,
+            )
+            for line in output.splitlines():
+                if "Product Serial" in line or "Board Serial" in line:
+                    val = line.split(":", 1)[1].strip()
+                    if self._is_valid_serial(val):
+                        logging.info("Using IPMI FRU serial as device serial: %s", val)
+                        return val
+        except Exception:
+            pass
+
+        # 6. System UUID as last resort (always unique, but not a "serial")
+        try:
+            if self.system:
+                uuid = self.system[0].get("UUID", "").strip()
+                if uuid and uuid.lower() not in ("", "not settable", "not present"):
+                    logging.warning(
+                        "No valid serial found; using system UUID: %s", uuid
+                    )
+                    return uuid
+        except (IndexError, KeyError, AttributeError):
+            pass
+
+        logging.error("Could not find any valid serial number for this device")
+        return None
 
     def _get_chassis_serial(self):
         """
