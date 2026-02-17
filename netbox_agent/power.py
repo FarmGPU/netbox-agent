@@ -91,7 +91,7 @@ class PowerSupply:
         except NotImplementedError:
             logging.error("Cannot report power consumption for this vendor")
             return False
-        nb_psus = self.get_netbox_power_supply()
+        nb_psus = list(self.get_netbox_power_supply())
 
         if not len(nb_psus) or not len(psu_cons):
             return False
