@@ -657,10 +657,12 @@ class ServerBase:
         myips = list(nb.ipam.ip_addresses.filter(device_id=server.id))
         # Build a set of currently assigned IP IDs for validation
         assigned_ip_ids = {ip.id for ip in myips}
-        update = 0
 
         # Re-fetch the device to get current oob_ip/primary_ip4 state
         server = nb.dcim.devices.get(server.id)
+
+        # --- OOB IP (IPMI) assignment --- saved separately to avoid atomic failure ---
+        oob_update = False
 
         # Clear oob_ip if it points to an IP no longer assigned to this device
         if server.oob_ip and server.oob_ip.id not in assigned_ip_ids:
@@ -669,14 +671,33 @@ class ServerBase:
                 server.oob_ip,
             )
             server.oob_ip = None
-            update += 1
+            oob_update = True
 
         # Set oob_ip to the IPMI interface IP
-        for ip in myips:
-            if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
-                server.oob_ip = ip.id
-                update += 1
-                break
+        if not oob_update:
+            for ip in myips:
+                if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
+                    server.oob_ip = ip.id
+                    oob_update = True
+                    break
+
+        if oob_update:
+            try:
+                server.save()
+                logging.info(
+                    "Saved oob_ip for device %s (id=%s)",
+                    server.name, server.id,
+                )
+            except Exception as e:
+                logging.error(
+                    "Failed to save oob_ip for device %s (id=%s): %s",
+                    server.name, server.id, e,
+                )
+
+        # --- Primary IPv4 assignment --- saved separately to avoid atomic failure ---
+        # Re-fetch device to get clean state after oob_ip save
+        server = nb.dcim.devices.get(server.id)
+        primary_update = False
 
         # Clear primary_ip4 if it points to an IP no longer assigned
         if server.primary_ip4 and server.primary_ip4.id not in assigned_ip_ids:
@@ -685,7 +706,7 @@ class ServerBase:
                 server.primary_ip4,
             )
             server.primary_ip4 = None
-            update += 1
+            primary_update = True
 
         # Set primary_ip4 to the management IP (default gateway interface)
         if not server.primary_ip4:
@@ -698,16 +719,22 @@ class ServerBase:
                         and ip.family
                         and ip.family.value == 4
                     ):
-                        logging.info(
-                            "Setting primary_ip4 to %s (interface %s)",
-                            ip.address, mgmt_iface,
-                        )
                         server.primary_ip4 = ip.id
-                        update += 1
+                        primary_update = True
                         break
 
-        if update:
-            server.save()
+        if primary_update:
+            try:
+                server.save()
+                logging.info(
+                    "Saved primary_ip4 for device %s (id=%s)",
+                    server.name, server.id,
+                )
+            except Exception as e:
+                logging.error(
+                    "Failed to save primary_ip4 for device %s (id=%s): %s",
+                    server.name, server.id, e,
+                )
 
         logging.debug("Finished updating Server!")
 

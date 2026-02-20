@@ -47,6 +47,7 @@ CSV_BASE = os.path.join(os.path.expanduser("~"), "asset-tag-testing", "csvs")
 PDU_CSV = os.path.join(CSV_BASE, "pdus", "validated_hosts.csv")
 COMPUTE_CSV = os.path.join(CSV_BASE, "compute", "validated_hosts.csv")
 SWITCHES_CSV = os.path.join(CSV_BASE, "switches", "arista_switches.csv")
+MACHINES_CSV = os.path.join(CSV_BASE, "compute", "machines_validated.csv")
 
 # ── Credential classification ────────────────────────────────────────────────
 # Usernames considered "default/factory" credentials
@@ -119,6 +120,33 @@ def load_switch_credentials(path):
             user = row.get("validated_user", "").strip()
             pw = row.get("validated_password", "").strip()
             if not user:
+                continue
+            entries.append((asset_tag, user, pw))
+    return entries
+
+
+def load_machines_credentials(path):
+    """Load OEM BMC credentials from machines_validated.csv.
+
+    Produced by validate_machines_csv.py — contains OEM/admin default
+    passwords from machines.csv, cross-referenced with hostnames.csv
+    for asset tags and validated against live BMCs.
+
+    All entries with an asset_tag are included, regardless of validation
+    status.  Passwords are always present (from the source CSV); the
+    status field indicates whether the credential was live-verified.
+    """
+    entries = []
+    if not os.path.exists(path):
+        return entries
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            asset_tag = row.get("asset_tag", "").strip()
+            if not asset_tag:
+                continue
+            user = row.get("validated_user", "").strip()
+            pw = row.get("validated_password", "").strip()
+            if not user or not pw:
                 continue
             entries.append((asset_tag, user, pw))
     return entries
@@ -269,6 +297,8 @@ examples:
                         help="delete and recreate existing items")
     parser.add_argument("--pdu-csv", default=PDU_CSV)
     parser.add_argument("--compute-csv", default=COMPUTE_CSV)
+    parser.add_argument("--machines-csv", default=MACHINES_CSV,
+                        help="OEM BMC credentials from machines_validated.csv")
     parser.add_argument("--switches-csv", default=SWITCHES_CSV)
     args = parser.parse_args()
 
@@ -290,14 +320,22 @@ examples:
     print(f"Vault: {args.vault}")
     print(f"CSVs:  pdu={args.pdu_csv}")
     print(f"       compute={args.compute_csv}")
+    print(f"       machines={args.machines_csv}")
     print(f"       switches={args.switches_csv}")
 
     # Load all credentials (only entries with asset tags)
     pdu_all = load_pdu_credentials(args.pdu_csv)
     compute_all = load_compute_credentials(args.compute_csv)
+    machines_all = load_machines_credentials(args.machines_csv)
     switch_all = load_switch_credentials(args.switches_csv)
 
-    print(f"\nLoaded: {len(pdu_all)} PDU, {len(compute_all)} compute, {len(switch_all)} switch credentials (with asset tags)")
+    print(f"\nLoaded: {len(pdu_all)} PDU, {len(compute_all)} compute, "
+          f"{len(machines_all)} machines OEM, {len(switch_all)} switch credentials (with asset tags)")
+
+    # Merge machines OEM creds into compute — these are all ADMIN/default.
+    # Deduplicate by asset_tag: if the same tag exists in both compute_all
+    # and machines_all, keep both (they may be different users: fgpu vs ADMIN).
+    compute_all = compute_all + machines_all
 
     # Classify into default vs farmgpu
     pdu_default, pdu_farmgpu = classify_credentials(pdu_all)
