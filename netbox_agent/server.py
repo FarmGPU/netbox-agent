@@ -16,6 +16,7 @@ from netbox_agent.misc import (
     get_device_role,
     get_device_type,
     get_device_platform,
+    get_or_create_manufacturer,
 )
 from netbox_agent.network import ServerNetwork
 from netbox_agent.power import PowerSupply
@@ -147,6 +148,15 @@ class ServerBase:
             site_id=datacenter.id,
         )
 
+    def get_manufacturer(self):
+        """
+        Return the system manufacturer from dmidecode info (e.g. 'Supermicro').
+        """
+        try:
+            return self.system[0]["Manufacturer"].strip()
+        except (IndexError, KeyError):
+            return None
+
     def get_product_name(self):
         """
         Return the Chassis Name from dmidecode info
@@ -202,7 +212,7 @@ class ServerBase:
         raise NotImplementedError
 
     def _netbox_create_chassis(self, datacenter, tenant, rack):
-        device_type = get_device_type(self.get_chassis())
+        device_type = get_device_type(self.get_chassis(), manufacturer=self.get_manufacturer())
         device_role = get_device_role(config.device.chassis_role)
         serial = self.get_chassis_service_tag()
         logging.info("Creating chassis blade (serial: {serial})".format(serial=serial))
@@ -221,7 +231,7 @@ class ServerBase:
 
     def _netbox_create_blade(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_product_name())
+        device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
         serial = self.get_service_tag()
         hostname = self.get_hostname()
         logging.info(
@@ -245,7 +255,7 @@ class ServerBase:
 
     def _netbox_create_blade_expansion(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_expansion_product())
+        device_type = get_device_type(self.get_expansion_product(), manufacturer=self.get_manufacturer())
         serial = self.get_expansion_service_tag()
         hostname = self.get_hostname() + " expansion"
         logging.info(
@@ -279,7 +289,7 @@ class ServerBase:
 
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
-        device_type = get_device_type(self.get_product_name())
+        device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
         if not device_type:
             raise Exception('Chassis "{}" doesn\'t exist'.format(self.get_chassis()))
         serial = self.get_service_tag()

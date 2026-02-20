@@ -3,6 +3,7 @@ from netbox_agent.config import netbox_instance as nb
 from slugify import slugify
 from shutil import which
 import distro
+import logging
 import subprocess
 import socket
 import re
@@ -20,10 +21,44 @@ def get_device_role(role):
     return device_role
 
 
-def get_device_type(type):
-    device_type = nb.dcim.device_types.get(model=type)
+def get_or_create_manufacturer(name):
+    """Get or create a manufacturer in NetBox."""
+    if not name:
+        name = "Unknown"
+    manufacturer = nb.dcim.manufacturers.get(name=name)
+    if manufacturer is None:
+        manufacturer = nb.dcim.manufacturers.get(slug=slugify(name))
+    if manufacturer is None:
+        logging.info('Auto-creating manufacturer "%s"', name)
+        manufacturer = nb.dcim.manufacturers.create(
+            name=name,
+            slug=slugify(name),
+        )
+    return manufacturer
+
+
+def get_device_type(model, manufacturer=None):
+    """Get or auto-create a device type in NetBox.
+
+    If the device type doesn't exist and a manufacturer name is provided,
+    both the manufacturer and device type are created automatically.
+    """
+    device_type = nb.dcim.device_types.get(model=model)
+    if device_type is None and manufacturer:
+        mfr = get_or_create_manufacturer(manufacturer)
+        logging.info(
+            'Auto-creating DeviceType "%s" (manufacturer: %s)', model, manufacturer
+        )
+        device_type = nb.dcim.device_types.create(
+            model=model,
+            slug=slugify(model),
+            manufacturer=mfr.id,
+        )
     if device_type is None:
-        raise Exception('DeviceType "{}" does not exist, please create it'.format(type))
+        raise Exception(
+            'DeviceType "{}" does not exist and no manufacturer provided'
+            " for auto-creation".format(model)
+        )
     return device_type
 
 
