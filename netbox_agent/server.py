@@ -538,17 +538,29 @@ class ServerBase:
         # them before saving any field (e.g., asset_tag).
         self._ensure_required_custom_fields(server, config)
 
-        # Sync asset tag: if BIOS has one and NetBox doesn't, push it
+        # Sync asset tag: only populate if NetBox record has NO asset tag.
+        # BMC API is the authority for asset_tag (programmed via Redfish).
+        # netbox-agent should never overwrite an existing tag — the OS-level
+        # dmidecode value may differ from the Redfish-programmed value on
+        # some platforms (e.g., AST2600 where FRU and Redfish AssetTag diverge).
         local_asset_tag = self.get_asset_tag()
-        if local_asset_tag and getattr(server, "asset_tag", None) != local_asset_tag:
+        existing_tag = getattr(server, "asset_tag", None)
+        if local_asset_tag and not existing_tag:
             logging.info(
-                "Updating asset_tag on '%s': %s → %s",
+                "Setting initial asset_tag on '%s': %s",
                 server.name,
-                getattr(server, "asset_tag", None),
                 local_asset_tag,
             )
             server.asset_tag = local_asset_tag
             server.save()
+        elif local_asset_tag and existing_tag and local_asset_tag != existing_tag:
+            logging.warning(
+                "Asset tag mismatch on '%s': NetBox=%s, local=%s "
+                "(keeping NetBox value — BMC API is authoritative)",
+                server.name,
+                existing_tag,
+                local_asset_tag,
+            )
 
         logging.debug("Updating Server...")
         # check network cards
