@@ -522,14 +522,14 @@ class ServerBase:
             if not chassis:
                 chassis = self._netbox_create_chassis(datacenter, tenant, rack)
 
-            server = nb.dcim.devices.get(serial=self.get_service_tag())
+            server = self.get_netbox_server()
             if not server:
                 server = self._netbox_create_blade(chassis, datacenter, tenant, rack)
 
             # Set slot for blade
             self._netbox_set_or_update_blade_slot(server, chassis, datacenter)
         else:
-            server = nb.dcim.devices.get(serial=self.get_service_tag())
+            server = self.get_netbox_server()
             if not server:
                 server = self._netbox_create_server(datacenter, tenant, rack)
 
@@ -607,12 +607,12 @@ class ServerBase:
             server.name = self.get_hostname()
             update += 1
 
-        # Sync device serial — cascade through multiple sources
-        local_serial = self._get_best_serial()
-        if local_serial and server.serial != local_serial:
+        # Sync device serial — system serial only, no fallbacks
+        local_serial = self._get_best_serial() or ""
+        if server.serial != local_serial:
             logging.info(
                 "Updating serial on '%s': %s -> %s",
-                server.name, server.serial, local_serial,
+                server.name, server.serial, local_serial or "(empty)",
             )
             server.serial = local_serial
             update += 1
