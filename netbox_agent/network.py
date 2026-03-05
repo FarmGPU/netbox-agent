@@ -102,6 +102,14 @@ class Network(object):
                     mac = None
             if mac:
                 mac = mac.upper()
+                # Filter out InfiniBand GUIDs (20 bytes) — only accept Ethernet MACs (6 bytes)
+                # Valid Ethernet MAC: XX:XX:XX:XX:XX:XX = 17 chars
+                if len(mac) != 17:
+                    logging.debug(
+                        "Skipping non-Ethernet MAC on %s: %s (%d chars)",
+                        interface, mac, len(mac),
+                    )
+                    mac = None
 
             mtu = int(open("/sys/class/net/{}/mtu".format(interface), "r").read().strip())
             vlan = None
@@ -331,7 +339,7 @@ class Network(object):
                 "mgmt_only": mgmt,
             }
         )
-        if nic["mac"]:
+        if nic["mac"] and len(nic["mac"]) == 17:
             params["mac_address"] = nic["mac"]
 
         if nic["mtu"]:
@@ -388,6 +396,12 @@ class Network(object):
         netbox_ips = nb.ipam.ip_addresses.filter(
             address=ip,
         )
+        # Also search by bare IP (without prefix) — BMC API may have stored
+        # the same IP with a different prefix length (e.g., /32 vs /20)
+        if not netbox_ips:
+            bare_ip = ip.split("/")[0]
+            netbox_ips = nb.ipam.ip_addresses.filter(address=bare_ip)
+
         if not netbox_ips:
             logging.info("Create new IP {ip} on {interface}".format(ip=ip, interface=interface))
             query_params = {
@@ -396,8 +410,21 @@ class Network(object):
                 "assigned_object_type": self.assigned_object_type,
                 "assigned_object_id": interface.id,
             }
-
-            netbox_ip = nb.ipam.ip_addresses.create(**query_params)
+            try:
+                netbox_ip = nb.ipam.ip_addresses.create(**query_params)
+            except Exception as e:
+                # Handle race condition: IP was created between our filter and create
+                if "Duplicate" in str(e):
+                    logging.warning("Duplicate IP %s detected, finding existing entry", ip)
+                    bare_ip = ip.split("/")[0]
+                    netbox_ips = list(nb.ipam.ip_addresses.filter(address=bare_ip))
+                    if netbox_ips:
+                        netbox_ip = netbox_ips[0]
+                        netbox_ip.assigned_object_type = self.assigned_object_type
+                        netbox_ip.assigned_object_id = interface.id
+                        netbox_ip.save()
+                        return netbox_ip
+                raise
             return netbox_ip
 
         netbox_ip = list(netbox_ips)[0]

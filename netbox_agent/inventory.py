@@ -102,13 +102,16 @@ class Inventory:
     def create_netbox_inventory_item(self, device_id, tags, vendor, name, serial, description):
         manufacturer = self.find_or_create_manufacturer(vendor)
 
+        # NetBox serial field is limited to 50 characters
+        serial_str = "{}".format(serial)[:50] if serial else ""
+
         _ = nb.dcim.inventory_items.create(
             device=device_id,
             manufacturer=manufacturer.id,
             discovered=True,
             tags=tags,
             name="{}".format(name),
-            serial="{}".format(serial),
+            serial=serial_str,
             description=description,
         )
 
@@ -159,13 +162,14 @@ class Inventory:
 
     def create_netbox_interface(self, iface):
         manufacturer = self.find_or_create_manufacturer(iface["vendor"])
+        serial_str = "{}".format(iface["serial"])[:50] if iface.get("serial") else ""
         _ = nb.dcim.inventory_items.create(
             device=self.device_id,
             manufacturer=manufacturer.id,
             discovered=True,
             tags=[{"name": INVENTORY_TAG["interface"]["name"]}],
             name="{}".format(iface["product"]),
-            serial="{}".format(iface["serial"]),
+            serial=serial_str,
             description="{} {}".format(iface["description"], iface["name"]),
         )
 
