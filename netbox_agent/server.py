@@ -8,6 +8,7 @@ import sys
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
+from netbox_agent.dependencies import missing_deps_string
 from netbox_agent.hypervisor import Hypervisor
 from netbox_agent.inventory import Inventory
 from netbox_agent.location import Datacenter, Rack, Tenant
@@ -307,6 +308,14 @@ class ServerBase:
         cf.setdefault("environment", "Production")
         cf.setdefault("record_completeness", "incomplete")
 
+        # Include BMC MAC and chassis serial at creation time
+        bmc_mac = self._get_bmc_mac()
+        if bmc_mac:
+            cf["bmc_mac_address"] = bmc_mac
+        chassis_serial = self._get_chassis_serial()
+        if chassis_serial:
+            cf["chassis_serial"] = chassis_serial
+
         create_kwargs = dict(
             name=hostname,
             serial=serial,
@@ -398,21 +407,48 @@ class ServerBase:
 
     def get_netbox_server(self, expansion=False):
         """
-        Dual-mode device lookup: prefer asset_tag, fall back to serial.
+        Triple-mode device lookup: asset_tag → serial → BMC MAC.
+
+        BMC API creates device skeletons with BMC MAC + OOB IP.  Some devices
+        (e.g. Gigabyte) have no usable serial and the asset tag may not yet be
+        programmed.  Matching by BMC MAC ensures netbox-agent enriches the
+        existing skeleton rather than creating a duplicate.
         """
         if expansion:
             return nb.dcim.devices.get(serial=self.get_expansion_service_tag())
 
-        # Try asset tag first
+        # Try asset tag first (case-insensitive — BMC may report 101K vs 101k)
         asset_tag = self.get_asset_tag()
         if asset_tag:
             device = nb.dcim.devices.get(asset_tag=asset_tag)
+            if not device:
+                # Try lowercase — BMC API stores lowercase, DMI may report uppercase
+                device = nb.dcim.devices.get(asset_tag=asset_tag.lower())
             if device:
                 return device
             logging.debug("No device found with asset_tag=%s, falling back to serial", asset_tag)
 
         # Fall back to serial
-        return nb.dcim.devices.get(serial=self.get_service_tag())
+        serial = self.get_service_tag()
+        if serial:
+            device = nb.dcim.devices.get(serial=serial)
+            if device:
+                return device
+            logging.debug("No device found with serial=%s, falling back to BMC MAC", serial)
+
+        # Fall back to BMC MAC (custom field cf_bmc_mac_address)
+        bmc_mac = self._get_bmc_mac()
+        if bmc_mac:
+            devices = list(nb.dcim.devices.filter(cf_bmc_mac_address=bmc_mac))
+            if devices:
+                logging.info(
+                    "Matched device by BMC MAC %s → %s (id=%s)",
+                    bmc_mac, devices[0].name, devices[0].id,
+                )
+                return devices[0]
+            logging.debug("No device found with bmc_mac=%s", bmc_mac)
+
+        return None
 
     def _netbox_set_or_update_blade_slot(self, server, chassis, datacenter):
         # before everything check if right chassis
@@ -493,7 +529,7 @@ class ServerBase:
         real_device_bay.installed_device = expansion
         real_device_bay.save()
 
-    def netbox_create_or_update(self, config):
+    def netbox_create_or_update(self, config, deps=None, network_only=False, state=None):
         """
         Netbox method to create or update info about our server/blade
 
@@ -505,6 +541,12 @@ class ServerBase:
         * Inventory management
         * PSU management
         * virtualization cluster device
+
+        Args:
+            config: Parsed configuration namespace
+            deps: dict of {tool_name: bool} from dependencies.check_all()
+            network_only: If True, skip hardware sync — only update network
+            state: StateManager instance for diff-based sync
         """
         datacenter = self.get_netbox_datacenter()
         rack = self.get_netbox_rack()
@@ -538,6 +580,18 @@ class ServerBase:
         # them before saving any field (e.g., asset_tag).
         self._ensure_required_custom_fields(server, config)
 
+        # Record missing dependencies as a custom field on the device
+        if deps is not None:
+            missing_str = missing_deps_string(deps)
+            cf = dict(server.custom_fields or {})
+            if cf.get("missing_agent_dependencies") != missing_str:
+                cf["missing_agent_dependencies"] = missing_str
+                server.custom_fields = cf
+                server.save()
+                if missing_str:
+                    logging.info("Missing dependencies on '%s': %s", server.name, missing_str)
+                server = nb.dcim.devices.get(server.id)  # re-fetch after save
+
         # Sync asset tag: only populate if NetBox record has NO asset tag.
         # BMC API is the authority for asset_tag (programmed via Redfish).
         # netbox-agent should never overwrite an existing tag — the OS-level
@@ -564,37 +618,43 @@ class ServerBase:
 
         logging.debug("Updating Server...")
         # check network cards
-        if config.register or config.update_all or config.update_network:
+        if config.register or config.update_all or config.update_network or network_only:
             self.network = ServerNetwork(server=self)
             self.network.create_or_update_netbox_network_cards()
-        update_inventory = config.inventory and (
-            config.register or config.update_all or config.update_inventory
-        )
-        # update inventory if feature is enabled (legacy Inventory Items)
-        self.inventory = Inventory(server=self)
-        if update_inventory:
-            self.inventory.create_or_update()
-        # update modules if feature is enabled (new Modules API)
-        update_modules = getattr(config, "modules", False) and (
-            config.register or config.update_all or getattr(config, "update_modules", False)
-        )
-        if update_modules:
-            from netbox_agent.modules import ModuleManager
-            self.module_manager = ModuleManager(server=self, config=config)
-            self.module_manager.create_or_update()
-        # update psu
-        if config.register or config.update_all or config.update_psu:
-            self.power = PowerSupply(server=self)
-            self.power.create_or_update_power_supply()
-            self.power.report_power_consumption()
-        # update virtualization cluster and virtual machines
-        if config.virtual.hypervisor and (
-            config.register or config.update_all or config.update_hypervisor
-        ):
-            self.hypervisor = Hypervisor(server=self)
-            self.hypervisor.create_or_update_device_cluster()
-            if config.virtual.list_guests_cmd:
-                self.hypervisor.create_or_update_device_virtual_machines()
+
+        # Defaults for variables used later (expansion slot path)
+        update_inventory = False
+
+        # When network_only, skip all hardware sync
+        if not network_only:
+            update_inventory = config.inventory and (
+                config.register or config.update_all or config.update_inventory
+            )
+            # update inventory if feature is enabled (legacy Inventory Items)
+            self.inventory = Inventory(server=self)
+            if update_inventory:
+                self.inventory.create_or_update()
+            # update modules if feature is enabled (new Modules API)
+            update_modules = getattr(config, "modules", False) and (
+                config.register or config.update_all or getattr(config, "update_modules", False)
+            )
+            if update_modules:
+                from netbox_agent.modules import ModuleManager
+                self.module_manager = ModuleManager(server=self, config=config)
+                self.module_manager.create_or_update(deps=deps, state=state)
+            # update psu
+            if config.register or config.update_all or config.update_psu:
+                self.power = PowerSupply(server=self)
+                self.power.create_or_update_power_supply()
+                self.power.report_power_consumption()
+            # update virtualization cluster and virtual machines
+            if config.virtual.hypervisor and (
+                config.register or config.update_all or config.update_hypervisor
+            ):
+                self.hypervisor = Hypervisor(server=self)
+                self.hypervisor.create_or_update_device_cluster()
+                if config.virtual.list_guests_cmd:
+                    self.hypervisor.create_or_update_device_virtual_machines()
 
         expansion = nb.dcim.devices.get(serial=self.get_expansion_service_tag())
         if self.own_expansion_slot() and config.expansion_as_device:

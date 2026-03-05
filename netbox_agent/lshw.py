@@ -2,14 +2,27 @@ from netbox_agent.misc import is_tool
 import subprocess
 import logging
 import json
-import sys
 
 
 class LSHW:
     def __init__(self):
+        self.hw_info = {}
+        self.info = {}
+        self.memories = []
+        self.interfaces = []
+        self.cpus = []
+        self.power = []
+        self.disks = []
+        self.gpus = []
+        self.vendor = "Unknown"
+        self.product = "Unknown"
+        self.chassis_serial = "Unknown"
+        self.motherboard_serial = "No S/N"
+        self.motherboard = "Motherboard"
+
         if not is_tool("lshw"):
-            logging.error("lshw does not seem to be installed")
-            sys.exit(1)
+            logging.warning("lshw not found -- hardware tree unavailable")
+            return
 
         data = subprocess.getoutput("lshw -quiet -json")
         json_data = json.loads(data)
@@ -19,22 +32,17 @@ class LSHW:
             self.hw_info = json_data[0]
         else:
             self.hw_info = json_data
-        self.info = {}
-        self.memories = []
-        self.interfaces = []
-        self.cpus = []
-        self.power = []
-        self.disks = []
-        self.gpus = []
-        self.vendor = self.hw_info["vendor"]
-        self.product = self.hw_info["product"]
-        self.chassis_serial = self.hw_info["serial"]
-        self.motherboard_serial = self.hw_info["children"][0].get("serial", "No S/N")
-        self.motherboard = self.hw_info["children"][0].get("product", "Motherboard")
 
-        for k in self.hw_info["children"]:
-            if k["class"] == "power":
-                # self.power[k["id"]] = k
+        self.vendor = self.hw_info.get("vendor", "Unknown")
+        self.product = self.hw_info.get("product", "Unknown")
+        self.chassis_serial = self.hw_info.get("serial", "Unknown")
+        children = self.hw_info.get("children", [])
+        if children:
+            self.motherboard_serial = children[0].get("serial", "No S/N")
+            self.motherboard = children[0].get("product", "Motherboard")
+
+        for k in children:
+            if k.get("class") == "power":
                 self.power.append(k)
 
             if "children" in k:

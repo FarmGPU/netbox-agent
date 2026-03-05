@@ -949,10 +949,14 @@ class ModuleManager:
     #  Public Interface
     # ------------------------------------------------------------------ #
 
-    def create_or_update(self):
+    def create_or_update(self, deps=None, state=None):
         """
         Main entry point: detect local hardware and sync all categories to NetBox.
         Must be called after the device exists in NetBox.
+
+        Args:
+            deps: dict of {tool_name: bool} from dependencies.check_all()
+            state: StateManager instance for diff-based sync (optional)
         """
         self.device = self.server.get_netbox_server()
         if not self.device:
@@ -961,6 +965,9 @@ class ModuleManager:
 
         logger.info("Starting module sync for device '%s' (id=%d)", self.device.name, self.device.id)
 
+        # Skip PSU detection when dmidecode is unavailable
+        skip_psu = deps is not None and not deps.get("dmidecode", True)
+
         # Detect all local hardware
         detections = {
             "cpu": self._get_local_cpus(),
@@ -968,16 +975,45 @@ class ModuleManager:
             "dimm": self._get_local_dimms(),
             "ssd": self._get_local_ssds(),
             "nic": self._get_local_nics(),
-            "psu": self._get_local_psus(),
         }
+        if skip_psu:
+            logger.info("Skipping PSU detection — dmidecode unavailable")
+            detections["psu"] = []
+        else:
+            detections["psu"] = self._get_local_psus()
 
         for category, items in detections.items():
             logger.info("Detected %d %s(s)", len(items), category)
+
+            # Diff-based sync: skip unchanged categories
+            if state is not None:
+                changed, summary = state.diff_hardware(category, items)
+                if not changed:
+                    logger.info("Skipping %s sync — unchanged", category)
+                    continue
+                else:
+                    logger.info("Hardware changed for %s: %s", category, summary)
+
             try:
                 self._sync_category(category, items)
             except Exception as e:
                 logger.error("Failed to sync %s: %s", category, e)
                 # Continue with other categories
+
+        # Save state after successful sync
+        if state is not None:
+            try:
+                hostname = self.device.name
+                # Convert items to serializable format
+                hw_state = {}
+                for cat, items in detections.items():
+                    hw_state[cat] = [
+                        {k: v for k, v in item.items() if k in ("product", "vendor", "serial")}
+                        for item in items
+                    ]
+                state.save(hostname, hw_state, dependencies=deps)
+            except Exception as e:
+                logger.warning("Failed to save state: %s", e)
 
         logger.info("Module sync complete for device '%s'", self.device.name)
         return True

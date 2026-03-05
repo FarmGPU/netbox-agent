@@ -78,6 +78,15 @@ def run(nb):
             "description": "Lease or reservation expiry date",
             "weight": 500,
         },
+        {
+            "name": "missing_agent_dependencies",
+            "label": "Missing Agent Dependencies",
+            "type": "text",
+            "object_types": ["dcim.device"],
+            "required": False,
+            "description": "Comma-separated list of tools missing on this server (auto-populated by netbox-agent)",
+            "weight": 700,
+        },
     ]
 
     for field_def in fields:

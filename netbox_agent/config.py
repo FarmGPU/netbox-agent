@@ -173,6 +173,16 @@ def get_config():
         default=None,
         help="Command to read asset tag from hardware (e.g., SMBIOS/FRU)",
     )
+    p.add_argument(
+        "--network-only",
+        action="store_true",
+        help="Skip hardware sync, only update network interfaces and IPs",
+    )
+    p.add_argument(
+        "--state-dir",
+        default="/var/lib/netbox-agent-test",
+        help="Directory for state file (diff-based sync)",
+    )
 
     options = p.parse_args()
     return options
