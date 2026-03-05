@@ -83,8 +83,22 @@ from netbox_agent.modules import ModuleManager, CATEGORIES
 
 @pytest.fixture(autouse=True)
 def reset_nb_mock():
-    """Reset the shared mock nb between tests."""
+    """Reset the shared mock nb between tests, including nested side_effects."""
     _mock_nb.reset_mock()
+    # Clear side_effects on commonly-used nested mocks (reset_mock doesn't do this in 3.12)
+    for group in (
+        _mock_nb.dcim.manufacturers,
+        _mock_nb.dcim.module_types,
+        _mock_nb.dcim.module_type_profiles,
+        _mock_nb.dcim.module_bays,
+        _mock_nb.dcim.modules,
+        _mock_nb.dcim.devices,
+    ):
+        for attr_name in ("get", "filter", "create"):
+            attr = getattr(group, attr_name, None)
+            if attr and hasattr(attr, "side_effect"):
+                attr.side_effect = None
+                attr.return_value = MagicMock()
     yield _mock_nb
 
 
@@ -744,3 +758,619 @@ class TestSerialValidation:
         """Leading/trailing whitespace should be stripped before validation."""
         assert self._is_valid_serial("  S452NF30LT00023  ")
         assert not self._is_valid_serial("  Not Specified  ")
+
+
+# ---------------------------------------------------------------------------
+# Tests: API Retry
+# ---------------------------------------------------------------------------
+
+from netbox_agent.modules import _api_retry, MAX_RETRIES, RETRY_BACKOFF
+
+
+class TestApiRetry:
+
+    def test_api_retry_success_first_attempt(self):
+        """Succeeds on first call — no retries needed."""
+        func = MagicMock(return_value="ok")
+        result = _api_retry(func, "arg1", key="val")
+        assert result == "ok"
+        func.assert_called_once_with("arg1", key="val")
+
+    def test_api_retry_success_on_second_attempt(self):
+        """Fails once, succeeds on second call."""
+        func = MagicMock(side_effect=[Exception("fail"), "ok"])
+        with patch("netbox_agent.modules.time.sleep"):
+            result = _api_retry(func)
+        assert result == "ok"
+        assert func.call_count == 2
+
+    def test_api_retry_exhaustion_raises(self):
+        """All retries fail → raises the last exception."""
+        func = MagicMock(side_effect=Exception("persistent failure"))
+        with patch("netbox_agent.modules.time.sleep"):
+            with pytest.raises(Exception, match="persistent failure"):
+                _api_retry(func)
+        assert func.call_count == MAX_RETRIES
+
+    def test_api_retry_backoff_timing(self):
+        """Verify exponential backoff delays: 2, 4 seconds."""
+        func = MagicMock(side_effect=[Exception("e1"), Exception("e2"), "ok"])
+        with patch("netbox_agent.modules.time.sleep") as mock_sleep:
+            _api_retry(func)
+        # First retry: 2 * 2^0 = 2s, second retry: 2 * 2^1 = 4s
+        calls = [c.args[0] for c in mock_sleep.call_args_list]
+        assert calls == [RETRY_BACKOFF * (2 ** 0), RETRY_BACKOFF * (2 ** 1)]
+
+    def test_api_retry_logs_warnings(self):
+        """Retries log warning messages."""
+        func = MagicMock(side_effect=[Exception("oops"), "ok"])
+        with patch("netbox_agent.modules.time.sleep"), \
+             patch("netbox_agent.modules.logger") as mock_logger:
+            _api_retry(func)
+        mock_logger.warning.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Sync Algorithm (extended)
+# ---------------------------------------------------------------------------
+
+class TestSyncAlgorithmExtended:
+
+    def test_sync_duplicate_serials_warns(self, mm, nb):
+        """Duplicate serials in remote lookup should log warning."""
+        device = SimpleNamespace(id=1, name="test-server")
+        mm.device = device
+
+        bay = SimpleNamespace(id=100, name="GPU-0")
+        nb.dcim.module_bays.filter.side_effect = [[], [bay]]
+
+        # No existing modules on device, but global serial search finds 2
+        dup_mod1 = MagicMock(id=200, serial="DUP-SN")
+        dup_mod2 = MagicMock(id=201, serial="DUP-SN")
+        nb.dcim.modules.filter.side_effect = [
+            [],  # existing on device
+            [dup_mod1, dup_mod2],  # global serial search
+            [],  # bay occupancy check
+        ]
+
+        mock_mfr = MagicMock(id=10)
+        nb.dcim.manufacturers.get.return_value = mock_mfr
+        nb.dcim.module_type_profiles.get.return_value = MagicMock(id=1)
+        nb.dcim.module_types.get.return_value = MagicMock(id=50)
+
+        with patch("netbox_agent.modules.logger") as mock_logger:
+            mm._sync_category("gpu", [
+                {"product": "A100", "vendor": "NVIDIA", "serial": "DUP-SN"},
+            ])
+        # Should log warning about duplicate serials
+        warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
+        assert any("Duplicate" in s or "duplicate" in s.lower() for s in warning_calls)
+
+    def test_sync_partial_failure_continues(self, mm, nb):
+        """Failure in one category doesn't stop others."""
+        mm._get_local_cpus = MagicMock(return_value=[])
+        mm._get_local_gpus = MagicMock(return_value=[])
+        mm._get_local_dimms = MagicMock(return_value=[])
+        mm._get_local_ssds = MagicMock(return_value=[])
+        mm._get_local_nics = MagicMock(return_value=[])
+        mm._get_local_psus = MagicMock(return_value=[])
+
+        # Make sync_category fail for gpu but succeed for others
+        original_sync = mm._sync_category
+        call_count = [0]
+
+        def failing_sync(category, items):
+            call_count[0] += 1
+            if category == "gpu":
+                raise Exception("GPU sync failed")
+            return original_sync(category, items)
+
+        mm._sync_category = failing_sync
+        nb.dcim.modules.filter.return_value = []
+
+        result = mm.create_or_update()
+        assert result is True
+        # All 6 categories attempted despite GPU failure
+        assert call_count[0] == 6
+
+    def test_sync_no_serial_positional_match(self, mm, nb):
+        """CPUs (no serial) use positional matching by bay index."""
+        device = SimpleNamespace(id=1, name="test-server")
+        mm.device = device
+
+        bay0 = SimpleNamespace(id=100, name="CPU-0")
+        nb.dcim.module_bays.filter.side_effect = [
+            [bay0],  # existing bays
+            [bay0],  # re-fetch
+        ]
+
+        # Existing module in bay
+        existing_mod = MagicMock(id=300, serial=None)
+        existing_mod.module_type = MagicMock(id=50)
+        existing_mod.module_bay = SimpleNamespace(name="CPU-0", display="CPU-0")
+
+        nb.dcim.modules.filter.side_effect = [
+            [existing_mod],  # existing on device
+            [existing_mod],  # bay occupancy check
+        ]
+
+        mock_mfr = MagicMock(id=10)
+        nb.dcim.manufacturers.get.return_value = mock_mfr
+        nb.dcim.module_type_profiles.get.return_value = MagicMock(id=1)
+        nb.dcim.module_types.get.return_value = MagicMock(id=50)
+
+        mm._sync_category("cpu", [
+            {"product": "Xeon Gold 6430", "vendor": "Intel", "serial": None},
+        ])
+        # Should not create new — existing module is positionally matched
+        nb.dcim.modules.create.assert_not_called()
+
+    def test_sync_empty_category_moves_all_to_spare(self, mm, nb):
+        """Empty local items → all existing modules moved to spare."""
+        device = SimpleNamespace(id=1, name="test-server")
+        mm.device = device
+
+        mod1 = MagicMock(id=300, serial="SN-1")
+        mod1.module_bay = SimpleNamespace(name="SSD-0", display="SSD-0")
+        mod2 = MagicMock(id=301, serial="SN-2")
+        mod2.module_bay = SimpleNamespace(name="SSD-1", display="SSD-1")
+
+        spare = SimpleNamespace(id=999, name="SPARE-INVENTORY")
+        spare_bay = SimpleNamespace(id=500, name="SSD-0")
+        spare_bay2 = SimpleNamespace(id=501, name="SSD-1")
+
+        def modules_filter(**kwargs):
+            device_id = kwargs.get("device_id")
+            if device_id == 1:
+                return [mod1, mod2]
+            elif device_id == 999:
+                return []
+            return []
+
+        def bays_filter(**kwargs):
+            return [spare_bay, spare_bay2]
+
+        nb.dcim.devices.get.return_value = spare
+        nb.dcim.modules.filter.side_effect = modules_filter
+        nb.dcim.module_bays.filter.side_effect = bays_filter
+
+        mm._sync_category("ssd", [])
+        # Both modules should have been re-parented (save called)
+        assert mod1.save.called
+        assert mod2.save.called
+
+    def test_sync_module_type_resolution_failure_skips(self, mm, nb):
+        """If module type resolution fails, that item raises."""
+        device = SimpleNamespace(id=1, name="test-server")
+        mm.device = device
+
+        bay0 = SimpleNamespace(id=100, name="GPU-0")
+        nb.dcim.module_bays.filter.side_effect = [[], [bay0]]
+        nb.dcim.modules.filter.return_value = []
+
+        # Make type resolution fail — use try/finally to clean up side_effect
+        nb.dcim.manufacturers.get.side_effect = Exception("API error")
+        try:
+            with patch("netbox_agent.modules.time.sleep"):
+                with pytest.raises(Exception, match="API error"):
+                    mm._sync_category("gpu", [
+                        {"product": "BadGPU", "vendor": "Unknown", "serial": "SN1"},
+                    ])
+        finally:
+            nb.dcim.manufacturers.get.side_effect = None
+            nb.dcim.module_bays.filter.side_effect = None
+            nb.dcim.modules.filter.side_effect = None
+
+    def test_sync_bay_conflict_moves_occupant(self, mm, nb):
+        """When target bay is occupied by different module, occupant is moved to spare."""
+        device = SimpleNamespace(id=1, name="test-server")
+        mm.device = device
+
+        bay0 = SimpleNamespace(id=100, name="GPU-0")
+        nb.dcim.module_bays.filter.side_effect = [
+            [],  # initial check
+            [bay0],  # re-fetch after creation
+        ]
+
+        # Existing module occupying bay (different serial)
+        occupant = MagicMock(id=400, serial="OLD-SN")
+        occupant.module_bay = SimpleNamespace(name="GPU-0", display="GPU-0")
+
+        spare = SimpleNamespace(id=999, name="SPARE-INVENTORY")
+        spare_bay = SimpleNamespace(id=600, name="GPU-0")
+
+        call_idx = [0]
+        def modules_filter_seq(**kwargs):
+            call_idx[0] += 1
+            device_id = kwargs.get("device_id")
+            module_bay_id = kwargs.get("module_bay_id")
+            serial = kwargs.get("serial")
+
+            if device_id == 1:
+                return []  # no modules on device matching serial
+            if serial == "NEW-SN":
+                return []  # not found anywhere
+            if module_bay_id == 100:
+                return [occupant]  # bay is occupied
+            if device_id == 999:
+                return []  # spare is empty
+            return []
+
+        nb.dcim.modules.filter.side_effect = modules_filter_seq
+        nb.dcim.devices.get.return_value = spare
+
+        def bays_filter_spare(**kwargs):
+            return [spare_bay]
+        # Override for spare device bay lookups
+        nb.dcim.module_bays.filter.side_effect = [
+            [],      # initial existing bays
+            [bay0],  # re-fetch
+            [spare_bay],  # spare bays
+        ]
+
+        mock_mfr = MagicMock(id=10)
+        nb.dcim.manufacturers.get.return_value = mock_mfr
+        nb.dcim.module_type_profiles.get.return_value = MagicMock(id=1)
+        nb.dcim.module_types.get.return_value = MagicMock(id=50)
+
+        new_mod = MagicMock(id=500)
+        nb.dcim.modules.create.return_value = new_mod
+
+        mm._sync_category("gpu", [
+            {"product": "H100", "vendor": "NVIDIA", "serial": "NEW-SN"},
+        ])
+        # Occupant should have been moved (save called to re-parent)
+        assert occupant.save.called
+
+    def test_sync_serial_existing_on_device_correct_bay_noop(self, mm, nb):
+        """Module already on device in correct bay → no-op."""
+        device = SimpleNamespace(id=1, name="test-server")
+        mm.device = device
+
+        bay0 = SimpleNamespace(id=100, name="GPU-0")
+        nb.dcim.module_bays.filter.side_effect = [
+            [bay0],  # existing bays
+            [bay0],  # re-fetch
+        ]
+
+        existing_mod = MagicMock(id=300, serial="GPU-SN-1")
+        existing_mod.module_type = MagicMock(id=50)
+        existing_mod.module_bay = SimpleNamespace(name="GPU-0", display="GPU-0")
+
+        nb.dcim.modules.filter.side_effect = [
+            [existing_mod],  # existing on device
+        ]
+
+        mock_mfr = MagicMock(id=10)
+        nb.dcim.manufacturers.get.return_value = mock_mfr
+        nb.dcim.module_type_profiles.get.return_value = MagicMock(id=1)
+        nb.dcim.module_types.get.return_value = MagicMock(id=50)
+
+        mm._sync_category("gpu", [
+            {"product": "A100", "vendor": "NVIDIA", "serial": "GPU-SN-1"},
+        ])
+        # No save (no changes) and no create
+        existing_mod.save.assert_not_called()
+        nb.dcim.modules.create.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Re-parenting
+# ---------------------------------------------------------------------------
+
+class TestReparenting:
+
+    def test_reparent_module_updates_device_and_bay(self, mm, nb):
+        """reparent_module sets device and bay on the module."""
+        module = MagicMock(serial="GPU-001")
+        target_device = SimpleNamespace(id=42, name="new-host")
+        target_bay = SimpleNamespace(id=200, name="GPU-0")
+
+        mm._reparent_module(module, target_device, target_bay)
+        assert module.device == 42
+        assert module.module_bay == 200
+        module.save.assert_called_once()
+
+    def test_move_to_spare_missing_device_returns_false(self, mm, nb):
+        """Spare device not found → returns False."""
+        nb.dcim.devices.get.return_value = None
+        module = MagicMock(serial="GPU-001")
+
+        result = mm._move_to_spare(module, "gpu")
+        assert result is False
+
+    def test_move_to_spare_no_free_bays_logs_error(self, mm, nb):
+        """No free bays on spare → returns False and logs error."""
+        spare = SimpleNamespace(id=999, name="SPARE-INVENTORY")
+        nb.dcim.devices.get.return_value = spare
+
+        spare_bay = SimpleNamespace(id=500, name="GPU-0")
+        occupant = MagicMock(id=600)
+        occupant.module_bay = SimpleNamespace(id=500)
+
+        nb.dcim.module_bays.filter.return_value = [spare_bay]
+        nb.dcim.modules.filter.return_value = [occupant]
+
+        module = MagicMock(serial="GPU-001")
+        result = mm._move_to_spare(module, "gpu")
+        assert result is False
+
+    def test_vacate_bay_occupied_moves_to_spare(self, mm, nb):
+        """Vacate bay with occupant → moves occupant to spare."""
+        bay = SimpleNamespace(id=100, name="GPU-0")
+        occupant = MagicMock(id=300, serial="OLD-SN")
+        nb.dcim.modules.filter.return_value = [occupant]
+
+        # Set up spare
+        spare = SimpleNamespace(id=999, name="SPARE-INVENTORY")
+        spare_bay = SimpleNamespace(id=500, name="GPU-0")
+        nb.dcim.devices.get.return_value = spare
+
+        def bays_filter(**kwargs):
+            return [spare_bay]
+
+        def modules_filter_spare(**kwargs):
+            device_id = kwargs.get("device_id")
+            module_bay_id = kwargs.get("module_bay_id")
+            if module_bay_id == 100:
+                return [occupant]
+            if device_id == 999:
+                return []
+            return []
+
+        nb.dcim.modules.filter.side_effect = modules_filter_spare
+        nb.dcim.module_bays.filter.return_value = [spare_bay]
+
+        mm._vacate_bay(bay, "gpu")
+        assert occupant.save.called
+
+    def test_vacate_bay_empty_noop(self, mm, nb):
+        """Vacate empty bay → no action taken."""
+        bay = SimpleNamespace(id=100, name="GPU-0")
+        nb.dcim.modules.filter.return_value = []
+
+        mm._vacate_bay(bay, "gpu")
+        nb.dcim.devices.get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Spare Device
+# ---------------------------------------------------------------------------
+
+class TestSpareDevice:
+
+    def test_get_spare_device_not_found_returns_none(self, mm, nb):
+        """Spare device not in NetBox → returns None."""
+        nb.dcim.devices.get.return_value = None
+        result = mm._get_spare_device()
+        assert result is None
+
+    def test_find_module_by_serial_found(self, mm, nb):
+        """Find module by serial → returns match."""
+        mod = MagicMock(id=100, serial="SN-001")
+        nb.dcim.modules.filter.return_value = [mod]
+        result = mm._find_module_by_serial("SN-001")
+        assert result.id == 100
+
+    def test_find_module_by_serial_not_found_returns_none(self, mm, nb):
+        """No module with serial → returns None."""
+        nb.dcim.modules.filter.return_value = []
+        result = mm._find_module_by_serial("NONEXISTENT")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: Module Type Resolution (extended)
+# ---------------------------------------------------------------------------
+
+class TestModuleTypeResolutionExtended:
+
+    def test_resolve_module_type_missing_profile_still_creates(self, mm, nb):
+        """Module type created even when profile not found."""
+        mock_mfr = MagicMock(id=10)
+        nb.dcim.manufacturers.get.return_value = mock_mfr
+        nb.dcim.module_type_profiles.get.return_value = None  # No profile
+        nb.dcim.module_types.get.return_value = None  # Doesn't exist
+        mock_new_mt = MagicMock(id=300)
+        nb.dcim.module_types.create.return_value = mock_new_mt
+
+        result = mm._resolve_module_type("gpu", {"product": "Test GPU", "vendor": "Test"})
+        assert result.id == 300
+        # Create should have been called without profile
+        create_args = nb.dcim.module_types.create.call_args[0][0]
+        assert "profile" not in create_args
+
+    def test_resolve_module_type_api_failure_raises(self, mm, nb):
+        """API failure during resolution propagates."""
+        nb.dcim.manufacturers.get.side_effect = Exception("API down")
+        try:
+            with patch("netbox_agent.modules.time.sleep"):
+                with pytest.raises(Exception, match="API down"):
+                    mm._resolve_module_type("cpu", {"product": "Xeon", "vendor": "Intel"})
+        finally:
+            nb.dcim.manufacturers.get.side_effect = None
+
+    def test_manufacturer_slug_generation(self, mm, nb):
+        """Manufacturer slug is generated from name."""
+        nb.dcim.manufacturers.get.return_value = None
+        new_mfr = MagicMock(id=20)
+        nb.dcim.manufacturers.create.return_value = new_mfr
+
+        mm._get_or_create_manufacturer("My Test Vendor!")
+        call_kwargs = nb.dcim.manufacturers.create.call_args
+        # Slug should be lowercased and hyphenated
+        slug = call_kwargs[1].get("slug") or call_kwargs[0][1] if len(call_kwargs[0]) > 1 else None
+        if slug is None:
+            # Check keyword args
+            slug = call_kwargs.kwargs.get("slug", "")
+        assert "my-test-vendor" in slug.lower()
+
+    def test_manufacturer_cache_hit(self, mm, nb):
+        """Second lookup for same manufacturer uses cache."""
+        mock_mfr = MagicMock(id=10, name="Intel")
+        nb.dcim.manufacturers.get.return_value = mock_mfr
+
+        mm._get_or_create_manufacturer("Intel")
+        mm._get_or_create_manufacturer("Intel")
+        # Only one API call despite two lookups
+        assert nb.dcim.manufacturers.get.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: Edge Cases
+# ---------------------------------------------------------------------------
+
+class TestEdgeCases:
+
+    def test_parse_lsblk_empty_blockdevices(self, mm, mock_lshw):
+        """Empty blockdevices list → empty result."""
+        lsblk_data = {"blockdevices": []}
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
+             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+            mock_is_tool.side_effect = lambda t: t == "lsblk"
+            mock_subprocess.return_value = json.dumps(lsblk_data)
+            ssds = mm._get_local_ssds()
+        assert ssds == []
+
+    def test_nvme_enrichment_fallback_on_failure(self, mm, mock_lshw):
+        """NVMe enrichment failure falls back to lsblk data only."""
+        lsblk_data = {
+            "blockdevices": [
+                {"name": "nvme0n1", "type": "disk", "size": 100000,
+                 "model": "TestNVMe", "serial": "SN-1", "vendor": None,
+                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+            ]
+        }
+
+        call_idx = [0]
+        def mock_check_output(cmd, **kwargs):
+            call_idx[0] += 1
+            if "lsblk" in cmd:
+                return json.dumps(lsblk_data)
+            if "nvme" in cmd:
+                raise Exception("nvme-cli failed")
+            raise FileNotFoundError(cmd[0])
+
+        with patch("netbox_agent.modules.is_tool", return_value=True), \
+             patch("netbox_agent.modules.subprocess.check_output", side_effect=mock_check_output):
+            ssds = mm._get_local_ssds()
+
+        assert len(ssds) == 1
+        assert ssds[0]["serial"] == "SN-1"
+
+    def test_gpu_serial_placeholder_filtered(self, mm, mock_lshw):
+        """GPU serials that are placeholders ([N/A], N/A, 0) should be None."""
+        mock_lshw.get_hw_linux.return_value = [
+            {"product": "A100", "vendor": "NVIDIA", "description": "3D"},
+        ]
+        nvidia_output = "0, [N/A]"
+        with patch("netbox_agent.modules.is_tool", return_value=True), \
+             patch("netbox_agent.modules.subprocess.check_output", return_value=nvidia_output):
+            gpus = mm._get_local_gpus()
+        assert len(gpus) == 1
+        assert gpus[0]["serial"] is None
+
+    def test_gpu_mixed_discrete_and_onboard(self, mm, mock_lshw):
+        """Only discrete GPUs are detected — onboard VGA filtered out."""
+        mock_lshw.get_hw_linux.return_value = [
+            {"product": "ASPEED Graphics Family", "vendor": "ASPEED Technology, Inc.",
+             "description": "VGA compatible controller"},
+            {"product": "H100 80GB HBM3", "vendor": "NVIDIA Corporation",
+             "description": "3D controller"},
+        ]
+        with patch("netbox_agent.modules.is_tool", return_value=False):
+            gpus = mm._get_local_gpus()
+        assert len(gpus) == 1
+        assert "H100" in gpus[0]["product"]
+
+    def test_psu_serial_placeholder_filtered(self, mm):
+        """PSU placeholder serials (Not Specified, etc.) become None."""
+        mock_dmidecode = MagicMock()
+        mock_dmidecode.get_by_type.return_value = [
+            {"Name": "PSU-1", "Manufacturer": "Supermicro",
+             "Serial Number": "Not Specified"},
+            {"Name": "PSU-2", "Manufacturer": "Supermicro",
+             "Serial Number": "To Be Filled By O.E.M."},
+            {"Name": "PSU-3", "Manufacturer": "Supermicro",
+             "Serial Number": "PSU-REAL-SN"},
+        ]
+        with patch.dict(sys.modules, {"netbox_agent.dmidecode": mock_dmidecode}):
+            psus = mm._get_local_psus()
+        assert len(psus) == 3
+        assert psus[0]["serial"] is None
+        assert psus[1]["serial"] is None
+        assert psus[2]["serial"] == "PSU-REAL-SN"
+
+
+# ---------------------------------------------------------------------------
+# Tests: create_or_update with deps and state
+# ---------------------------------------------------------------------------
+
+class TestCreateOrUpdateWithDepsAndState:
+
+    def test_create_or_update_skips_psu_when_dmidecode_missing(self, mm, nb):
+        """When dmidecode unavailable, PSU detection is skipped."""
+        mm._get_local_cpus = MagicMock(return_value=[])
+        mm._get_local_gpus = MagicMock(return_value=[])
+        mm._get_local_dimms = MagicMock(return_value=[])
+        mm._get_local_ssds = MagicMock(return_value=[])
+        mm._get_local_nics = MagicMock(return_value=[])
+        mm._get_local_psus = MagicMock(return_value=[])
+        mm._sync_category = MagicMock()
+        nb.dcim.modules.filter.return_value = []
+
+        deps = {"dmidecode": False, "lshw": True}
+        result = mm.create_or_update(deps=deps)
+        assert result is True
+        # PSU detection should NOT have been called
+        mm._get_local_psus.assert_not_called()
+
+    def test_create_or_update_with_state_skips_unchanged(self, mm, nb):
+        """With state, unchanged categories are skipped."""
+        mm._get_local_cpus = MagicMock(return_value=[
+            {"product": "Xeon", "vendor": "Intel", "serial": None}
+        ])
+        mm._get_local_gpus = MagicMock(return_value=[])
+        mm._get_local_dimms = MagicMock(return_value=[])
+        mm._get_local_ssds = MagicMock(return_value=[])
+        mm._get_local_nics = MagicMock(return_value=[])
+        mm._get_local_psus = MagicMock(return_value=[])
+        mm._sync_category = MagicMock()
+        nb.dcim.modules.filter.return_value = []
+
+        # Create a mock state that reports no changes
+        mock_state = MagicMock()
+        mock_state.diff_hardware.return_value = (False, "unchanged")
+
+        result = mm.create_or_update(state=mock_state)
+        assert result is True
+        # sync_category should not have been called (all unchanged)
+        mm._sync_category.assert_not_called()
+
+    def test_create_or_update_with_state_syncs_changed(self, mm, nb):
+        """With state, changed categories ARE synced."""
+        mm._get_local_cpus = MagicMock(return_value=[
+            {"product": "Xeon", "vendor": "Intel", "serial": None}
+        ])
+        mm._get_local_gpus = MagicMock(return_value=[])
+        mm._get_local_dimms = MagicMock(return_value=[])
+        mm._get_local_ssds = MagicMock(return_value=[])
+        mm._get_local_nics = MagicMock(return_value=[])
+        mm._get_local_psus = MagicMock(return_value=[])
+        mm._sync_category = MagicMock()
+        nb.dcim.modules.filter.return_value = []
+
+        # State says CPU changed, rest unchanged
+        def mock_diff(category, items):
+            if category == "cpu":
+                return (True, "+1")
+            return (False, "unchanged")
+
+        mock_state = MagicMock()
+        mock_state.diff_hardware.side_effect = mock_diff
+
+        result = mm.create_or_update(state=mock_state)
+        assert result is True
+        # Only cpu should have been synced
+        assert mm._sync_category.call_count == 1
+        assert mm._sync_category.call_args[0][0] == "cpu"
