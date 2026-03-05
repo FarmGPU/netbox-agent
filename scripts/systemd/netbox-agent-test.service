@@ -1,0 +1,18 @@
+[Unit]
+Description=NetBox Agent Test — Full Hardware Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/netbox-agent-test
+Environment=PYTHONPATH=/opt/netbox-agent-test
+ExecStart=/usr/bin/python3 -m netbox_agent.cli -c /etc/netbox-agent-test/config.yml --update-all
+StateDirectory=netbox-agent-test
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netbox-agent-test
+
+[Install]
+WantedBy=multi-user.target

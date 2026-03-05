@@ -1,0 +1,11 @@
+[Unit]
+Description=NetBox Agent Test — Network Sync Timer (every 4h)
+
+[Timer]
+OnCalendar=0/4:00:00
+Persistent=true
+RandomizedDelaySec=120
+Unit=netbox-agent-test-network.service
+
+[Install]
+WantedBy=timers.target
