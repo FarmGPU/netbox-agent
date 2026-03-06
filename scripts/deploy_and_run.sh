@@ -27,7 +27,7 @@ TUNNEL_PORT=18443
 
 # Subnets that need an SSH tunnel to reach NetBox
 # (management server = NetBox host, tunnel forwards remote:18443 → localhost:443)
-TUNNEL_SUBNETS=("192.168.211." "192.168.213." "192.168.1." "10.100.191.")
+TUNNEL_SUBNETS=("192.168.211." "192.168.213." "192.168.1." "10.100.191." "10.100.208." "10.100.10.")
 
 # Jump host config — anaheim14 is dual-homed (10.100.191.46 + 192.168.211.175)
 # Used for subnets not directly reachable from management server

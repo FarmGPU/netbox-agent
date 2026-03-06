@@ -534,6 +534,23 @@ class Network(object):
             )
             for netbox_ip in netbox_ips:
                 if netbox_ip.address not in all_local_ips:
+                    # If this IP is the device's primary_ip4, clear it first —
+                    # NetBox refuses to unassign an IP that is still designated
+                    # as primary (returns 400 Bad Request).
+                    device_primary = getattr(self.device, "primary_ip4", None)
+                    if device_primary and device_primary.id == netbox_ip.id:
+                        logging.info(
+                            "Clearing primary_ip4 %s on device %s before unassigning",
+                            netbox_ip.address,
+                            getattr(self.device, "name", "?"),
+                        )
+                        # Re-fetch to avoid stale state
+                        fresh_device = nb.dcim.devices.get(self.device.id)
+                        fresh_device.primary_ip4 = None
+                        fresh_device.save()
+                        # Update local reference so downstream code sees the change
+                        self.device = nb.dcim.devices.get(self.device.id)
+
                     logging.info(
                         "Unassigning IP {ip} from {interface}".format(
                             ip=netbox_ip.address, interface=netbox_ip.assigned_object
