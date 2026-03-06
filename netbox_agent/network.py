@@ -547,7 +547,22 @@ class Network(object):
                         # Re-fetch to avoid stale state
                         fresh_device = nb.dcim.devices.get(self.device.id)
                         fresh_device.primary_ip4 = None
-                        fresh_device.save()
+                        try:
+                            fresh_device.save()
+                        except Exception as e:
+                            # NetBox may validate other IP fields (e.g., oob_ip)
+                            # that reference IPs not assigned to the device.
+                            # Clear those too and retry.
+                            err_str = str(e)
+                            if "oob_ip" in err_str:
+                                logging.warning(
+                                    "oob_ip validation failed during primary_ip4 clear — "
+                                    "also clearing oob_ip: %s", e,
+                                )
+                                fresh_device.oob_ip = None
+                                fresh_device.save()
+                            else:
+                                raise
                         # Update local reference so downstream code sees the change
                         self.device = nb.dcim.devices.get(self.device.id)
 
