@@ -178,6 +178,42 @@ def get_config():
         action="store_true",
         help="Skip hardware sync, only update network interfaces and IPs",
     )
+
+    # ARP neighbor reporting (sends MAC→IP pairs to bmc-api for reconciliation)
+    p.add_argument(
+        "--arp-report",
+        dest="arp_report_flag",
+        default=False,
+        action="store_true",
+        help="Run ARP neighbor scan and report to bmc-api (standalone mode)",
+    )
+    p.add_argument(
+        "--arp_report.enabled",
+        default=False,
+        action="store_true",
+        help="Enable ARP neighbor scanning and reporting to bmc-api",
+    )
+    p.add_argument(
+        "--arp_report.bmc_api_url",
+        default="http://localhost:8100",
+        help="bmc-api base URL for ARP pair submission",
+    )
+    p.add_argument(
+        "--arp_report.bmc_api_key",
+        default="",
+        help="bmc-api API key (operator role required)",
+    )
+    p.add_argument(
+        "--arp_report.interfaces",
+        default="",
+        help="Comma-separated interfaces to scan (empty = all non-ignored)",
+    )
+    p.add_argument(
+        "--arp_report.scan_timeout",
+        default=30,
+        type=int,
+        help="Timeout in seconds for arp-scan per interface",
+    )
     p.add_argument(
         "--state-dir",
         default="/var/lib/netbox-agent-test",

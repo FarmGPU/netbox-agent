@@ -72,3 +72,14 @@ inventory: true
 # Spare inventory device name for re-parenting modules when hardware is removed
 #
 # spare_device_name: "SPARE-INVENTORY"
+
+#
+# ARP neighbor reporting (sends discovered MAC→IP pairs to bmc-api)
+# Requires bmc-api with reconciler enabled
+#
+#arp_report:
+#  enabled: true
+#  bmc_api_url: "http://10.100.248.18:8100"
+#  bmc_api_key: "sk-operator-def456"
+#  interfaces: ""           # empty = scan all non-ignored interfaces
+#  scan_timeout: 30         # seconds per interface for arp-scan

@@ -75,6 +75,26 @@ def run(config):
         )
     if config.debug:
         server.print_debug()
+
+    # ARP neighbor reporting (after main sync)
+    arp_enabled = (
+        getattr(config, "arp_report", None)
+        and getattr(config.arp_report, "enabled", False)
+    )
+    arp_flag = getattr(config, "arp_report_flag", False)
+    if arp_enabled or arp_flag:
+        from netbox_agent.arp_reporter import scan_and_report
+        try:
+            arp_result = scan_and_report(config)
+            logging.info(
+                "ARP report: %d pairs from %d interfaces (%s)",
+                arp_result["pairs_submitted"],
+                arp_result["interfaces_scanned"],
+                arp_result["method"],
+            )
+        except Exception as e:
+            logging.warning("ARP report failed (non-fatal): %s", e)
+
     return 0
 
 
