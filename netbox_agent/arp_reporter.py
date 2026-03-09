@@ -57,8 +57,9 @@ def _scan_arp_scan(interface: str, timeout: int) -> list[tuple[str, str]]:
 def _scan_ip_neigh() -> list[tuple[str, str]]:
     """Parse kernel neighbor table as fallback.
 
-    Uses 'ip -j neigh show' for JSON output. Filters to REACHABLE and
-    STALE states (skips FAILED, INCOMPLETE, NOARP).
+    Uses 'ip -j neigh show' for JSON output. Only accepts REACHABLE
+    entries — STALE entries are excluded because they may hold outdated
+    IPs that could revert correct updates in NetBox.
 
     Returns:
         List of (MAC, IP) tuples from the neighbor table.
@@ -75,8 +76,8 @@ def _scan_ip_neigh() -> list[tuple[str, str]]:
             # state can be a list of strings like ["REACHABLE"] or ["STALE"]
             if isinstance(state, str):
                 state = [state]
-            valid_states = {"REACHABLE", "STALE"}
-            if not any(s in valid_states for s in state):
+            # Only REACHABLE — stale entries risk reporting outdated IPs
+            if "REACHABLE" not in state:
                 continue
             mac = entry.get("lladdr", "")
             ip = entry.get("dst", "")
