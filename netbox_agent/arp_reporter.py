@@ -191,8 +191,11 @@ def _get_scan_interfaces(config) -> list[str]:
     ignore_re = getattr(config.network, "ignore_interfaces", r"(dummy.*|docker.*)")
     interfaces = []
 
-    for iface in os.listdir("/sys/class/net/"):
+    for iface in sorted(os.listdir("/sys/class/net/")):
         if not os.path.islink(f"/sys/class/net/{iface}"):
+            continue
+        # Always skip loopback — scanning 127.0.0.0/8 is useless and slow
+        if iface == "lo":
             continue
         if ignore_re and re.match(ignore_re, iface):
             continue
