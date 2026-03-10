@@ -292,11 +292,12 @@ def scan_and_report(config) -> dict:
         headers["Authorization"] = f"Bearer {bmc_api_key}"
 
     try:
+        post_timeout = getattr(config.arp_report, "post_timeout", 120)
         resp = requests.post(
             url,
             json={"pairs": pairs_list, "hostname": hostname},
             headers=headers,
-            timeout=30,
+            timeout=post_timeout,
         )
         result["pairs_submitted"] = len(pairs_list)
         result["response"] = resp.json() if resp.ok else {"status_code": resp.status_code, "text": resp.text}

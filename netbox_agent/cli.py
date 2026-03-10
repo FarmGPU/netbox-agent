@@ -87,7 +87,8 @@ def run(config):
         try:
             arp_result = scan_and_report(config)
             logging.info(
-                "ARP report: %d pairs from %d interfaces (%s)",
+                "ARP report: %d pairs found, %d submitted from %d interfaces (%s)",
+                arp_result["pairs_found"],
                 arp_result["pairs_submitted"],
                 arp_result["interfaces_scanned"],
                 arp_result["method"],
