@@ -1,307 +1,441 @@
-# Netbox agent [![Build Status](https://travis-ci.com/Solvik/netbox-agent.svg?branch=master)](https://travis-ci.com/Solvik/netbox-agent)
+# netbox-agent
 
-This project aims to create hardware automatically into [Netbox](https://github.com/netbox-community/netbox) based on standard tools (dmidecode, lldpd, parsing /sys/, etc).
+Hardware inventory agent for [NetBox](https://github.com/netbox-community/netbox). Runs on each host, discovers hardware (CPU, GPU, RAM, NIC, SSD, PSU), network interfaces, and IPs, then syncs everything to NetBox via the REST API.
 
-The goal is to generate an existing infrastructure on Netbox and have the ability to update it regularly by executing the agent.
+Forked from [Solvik/netbox-agent](https://github.com/Solvik/netbox-agent). This fork adds the Modules API, ARP neighbor reporting, state-based diff sync, systemd timer deployment, and RHEL bootc support.
 
-# Features
+---
 
-* Create virtual machines, servers, chassis and blade through standard tools (`dmidecode`)
-* Create physical, bonding and vlan network interfaces with IPs (IPv4 & IPv6)
-* Create IPMI interface if found
-* Create or get existing VLAN and associate it to interfaces
-* Generic ability to guess datacenters and rack location through drivers (`cmd` and `file` and custom ones)
-* Update existing `Device` and `Interface`
-* Handle blade moving (new slot, new chassis)
-* Handle blade GPU expansions
-* Automatic cabling (server's interface to switch's interface) using lldp
-* Local inventory using `Inventory Item` for CPU, GPU, RAM, RAID cards, physical disks (behind raid cards)
-* PSUs creation and power consumption reporting (based on vendor's tools)
-* Associate hypervisor devices to the virtualization cluster
-* Associate virtual machines to the hypervisor device
+## Features
 
-# Requirements
+- **Module-based hardware inventory** — CPU, GPU, RAM, NIC, SSD, PSU tracked as NetBox Modules (new Modules API)
+- **Network interface sync** — physical, bonding, and VLAN interfaces with IPv4/IPv6 addresses
+- **IPMI/OOB interface** — creates management interface with OOB IP
+- **Asset tag reading** — reads from DMI, IPMI FRU, or custom command
+- **ARP neighbor reporting** — scans local network for MAC→IP pairs, POSTs to bmc-api for reconciliation
+- **State-based diff sync** — tracks hardware state between runs, only syncs what changed
+- **Systemd timers** — daily full sync + 4-hour network sync + boot sync
+- **Multi-vendor support** — Dell, HP/HPE, Supermicro, QCT, plus generic fallback
+- **Blade server support** — chassis/blade hierarchy, slot detection, GPU expansion handling
+- **Platform detection** — auto-detects Linux distribution, sets NetBox platform
+- **RHEL bootc support** — works on immutable-root bootc containers via `/var/opt` paths
 
-- Netbox >= 3.7
+---
+
+## Requirements
+
+- NetBox >= 3.7
 - Python >= 3.8
-- [pynetbox](https://github.com/digitalocean/pynetbox/)
-- [python3-netaddr](https://github.com/netaddr/netaddr)
-- [python3-netifaces](https://github.com/al45tair/netifaces)
-- [jsonargparse](https://github.com/omni-us/jsonargparse/)
 
-- ethtool
-- dmidecode
-- ipmitool
-- lldpd
-- lshw
+### System packages
 
-## Inventory requirement
-- hpassacli
-- storcli
-- omreport
+| Package | Purpose |
+|---------|---------|
+| `ethtool` | NIC speed/type detection |
+| `dmidecode` | Hardware identity (serial, manufacturer, model) |
+| `ipmitool` | IPMI/BMC interface and asset tag reading |
+| `lshw` | Hardware enumeration (GPU, NIC, storage, memory) |
+| `arp-scan` | ARP neighbor discovery (optional — falls back to `ip neigh`) |
 
-# Installation
+### Python dependencies
 
-```
-# pip3 install netbox-agent
-```
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `pynetbox` | 7.4.1 | NetBox API client |
+| `netaddr` | 1.3.0 | IP address handling |
+| `netifaces2` | 0.0.22 | Network interface enumeration |
+| `pyyaml` | 6.0.2 | Configuration parsing |
+| `jsonargparse` | 4.36.0 | CLI argument + config file parsing |
+| `python-slugify` | 8.0.4 | Slug generation for NetBox |
+| `packaging` | 24.2 | Version comparison |
+| `distro` | 1.9.0 | Linux distribution detection |
 
-# Usage
+---
 
-The agent can be run from a shell and get its configuration from either the configuration file or environment variables.
+## Installation
 
-Configuration values are overridden based on the following precedence: command line arguments (might include config file) > environment variables > default config file > defaults.
+### Via Ansible role (recommended)
 
-```
-# netbox_agent -c /etc/netbox_agent.yaml --register
-INFO:root:Creating chassis blade (serial: QTFCQ574502EF)
-INFO:root:Creating blade (serial: QTFCQ574502D2) myserver on chassis QTFCQ574502EF
-INFO:root:Setting device (QTFCQ574502D2) new slot on Slot 9 (Chassis QTFCQ574502EF)..
-INFO:root:Interface a8:1e:84:f2:9e:6a not found, creating..
-INFO:root:Creating NIC enp1s0f1 (a8:1e:84:f2:9e:6a) on myserver
-INFO:root:Interface 02:42:7a:89:cf:a4 not found, creating..
-INFO:root:Creating NIC br-07ea1e4a2f0e (02:42:7a:89:cf:a4) on myserver
-INFO:root:Create new IP 172.19.0.1/16 on br-07ea1e4a2f0e
-INFO:root:Interface a8:1e:84:f2:9e:69 not found, creating..
-INFO:root:Creating NIC enp1s0f0 (a8:1e:84:f2:9e:69) on myserver
-INFO:root:Create new IP 42.42.42.42/24 on enp1s0f0
-INFO:root:Create new IP fe80::aa1e:84ff:fef2:9e69/64 on enp1s0f0
-INFO:root:Interface a8:1e:84:cd:9d:d6 not found, creating..
-INFO:root:Creating NIC IPMI (a8:1e:84:cd:9d:d6) on myserver
-INFO:root:Create new IP 10.191.122.10/24 on IPMI
+The `netbox-agent` Ansible role handles cloning, venv creation, config deployment, and systemd timer setup. See `fgpu_ansible/roles/netbox-agent/`.
+
+```bash
+ansible-playbook test-netbox-agent.yml --limit ginger04 -e netbox_token=<token>
 ```
 
-If you need, you can update only specific informations like:
-* Network
-* Inventory
-* Location
-* PSUs
+### Manual
 
-```
-# ip a add 42.42.42.43/24 dev enp1s0f1
-# netbox_agent -c /etc/netbox_agent.yaml --update-network
-INFO:root:Create new IP 42.42.42.43/24 on enp1s0f1
-# netbox_agent --update-inventory
-INFO:root:Creating Disk Samsung SSD 850 S2RBNX0K101698D
+```bash
+git clone git@github.com:FarmGPU/netbox-agent.git
+cd netbox-agent
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+cp netbox_agent.yaml.example /etc/netbox-agent/config.yaml
+# Edit config with your NetBox URL and token
 ```
 
-# Configuration
+---
 
+## Usage
+
+```bash
+# Full hardware + network sync (first run or daily)
+netbox_agent -c /etc/netbox-agent/config.yaml --update-all
+
+# Network-only sync (every 4 hours via timer)
+netbox_agent -c /etc/netbox-agent/config.yaml --network-only
+
+# ARP neighbor scan and report to bmc-api
+netbox_agent -c /etc/netbox-agent/config.yaml --arp-report
+
+# Register a new device (create in NetBox)
+netbox_agent -c /etc/netbox-agent/config.yaml --register
 ```
-# Netbox configuration
+
+### CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `-c, --config` | Path to config file |
+| `-r, --register` | Create new device in NetBox |
+| `-u, --update-all` | Full sync: hardware, network, location, PSU |
+| `--update-network` | Sync network interfaces and IPs only |
+| `--update-inventory` | Sync legacy inventory items only |
+| `--update-location` | Sync datacenter/rack location only |
+| `--update-psu` | Sync power supplies only |
+| `--network-only` | Skip hardware, sync network only (fast) |
+| `--arp-report` | Run ARP scan and POST pairs to bmc-api |
+| `--modules` | Enable Modules API hardware inventory |
+| `--update-modules` | Update modules this run |
+| `--expansion-as-device` | Treat blade expansions as separate devices |
+| `-d, --debug` | Enable debug logging |
+| `--log_level` | Set log level (default: debug) |
+| `--state-dir` | State file directory (default: `/var/lib/netbox-agent`) |
+
+---
+
+## Configuration
+
+Configuration is loaded from YAML file, environment variables (`NETBOX_AGENT_` prefix), or CLI flags. Precedence: CLI > env vars > config file > defaults.
+
+See [`netbox_agent.yaml.example`](netbox_agent.yaml.example) for a complete reference.
+
+### Minimal config
+
+```yaml
 netbox:
- url: 'http://netbox.internal.company.com'
- token: supersecrettoken
- # uncomment to disable ssl verification
- # ssl_verify: false
- # uncomment to use the system's CA certificates
- # ssl_ca_certs_file: /etc/ssl/certs/ca-certificates.crt
+  url: 'https://10.100.248.18'
+  token: your-netbox-token
+  ssl_verify: false
 
-# Network configuration
 network:
-  # Regex to ignore interfaces
   ignore_interfaces: "(dummy.*|docker.*)"
-  # Regex to ignore IP addresses
-  ignore_ips: (127\.0\.0\..*)
-  # enable auto-cabling by parsing LLDP answers
-  lldp: true
+  ignore_ips: "(127\\.0\\.0\\..*)"
 
-#
-# You can use these to change the Netbox roles.
-# These are the defaults.
-#
-#device:
-# chassis_role: "Server Chassis"
-# blade_role: "Blade"
-# server_role: "Server"
-# tags: server, blade, ,just a comma,delimited,list
-# custom_fields: field1=value1,field2=value2#
-#
-# Can use this to set the tenant
-#
-#tenant:
-# driver: "file:/tmp/tenant"
-# regex: "(.*)"
-
-## Enable virtual machine support
-# virtual:
-#   # not mandatory, can be guessed
-#   enabled: True
-#   # see https://netbox.company.com/virtualization/clusters/
-#   cluster_name: my_vm_cluster
-
-## Enable hypervisor support
-# virtual:
-#   enabled: false
-#   hypervisor: true
-#   cluster_name: my_cluster
-#   list_guests_cmd: command that lists VMs names
-
-# Enable datacenter location feature in Netbox
 datacenter_location:
- driver: "cmd:cat /etc/qualification | tr [A-Z] [a-z]"
- regex: "datacenter: (?P<datacenter>[A-Za-z0-9]+)"
-# driver: 'cmd:lldpctl'
-# regex: 'SysName: .*\.([A-Za-z0-9]+)'
-#
-# driver: "file:/tmp/datacenter"
-# regex: "(.*)"
+  driver: "cmd:echo datacenter: smf01"
+  regex: "datacenter: (?P<datacenter>[A-Za-z0-9]+)"
 
-# Enable rack location feature in Netbox
-rack_location:
-# driver: 'cmd:lldpctl'
-# match SysName: sw-dist-a1.dc42
-# regex: 'SysName:[ ]+[A-Za-z]+-[A-Za-z]+-([A-Za-z0-9]+)'
-#
-# driver: "file:/tmp/datacenter"
-# regex: "(.*)"
+# Hardware inventory via Modules API
+modules: true
+update_modules: true
+inventory: false
 
-# Enable local inventory reporting
-inventory: true
+# Spare device for re-parenting removed hardware
+spare_device_name: "SPARE-INVENTORY"
 ```
 
-# Specific workflow
+### ARP reporting config
 
-## Blades
-
-Each vendor class has a `is_blade` method which is later used for `Device` creation using the Netbox [parent/child feature](https://netbox.readthedocs.io/en/stable/core-functionality/devices/).
-
-The `get_blade_slot` method return the name of the `Device Bay`.
-
-
-Certain vendors don't report the blade slot in `dmidecode`, so we can use the `slot_location` regex feature of the configuration file.
-
-Some blade servers can be equipped with additional hardware using expansion blades, next to the processing blade, such as GPU expansion, or drives bay expansion. By default, the hardware from the expnasion is associated with the blade server itself, but it's possible to register the expansion as its own device using the `--expansion-as-device` command line parameter, or by setting `expansion_as_device` to `true` in the configuration file.
-
-## Drives attributes processing
-
-It is possible to process drives extended attributes such as the drive's physical or logical identifier, logical drive RAID type, size, consistency and so on.
-
-Those attributes as set as `custom_fields` in Netbox, and need to be registered properly before being able to specify them during the inventory phase.
-
-As the custom fields have to be created prior being able to register the disks extended attributes, this feature is only activated using the `--process-virtual-drives` command line parameter, or by setting `process_virtual_drives` to `true` in the configuration file.
-
-The custom fields to create as `DCIM > inventory item` `Text` are described below.
-
-```
-NAME            LABEL                      DESCRIPTION
-mount_point     Mount point                Device mount point(s)
-pd_identifier   Physical disk identifier   Physical disk identifier in the RAID controller
-vd_array        Virtual drive array        Virtual drive array the disk is member of
-vd_consistency  Virtual drive consistency  Virtual disk array consistency
-vd_device       Virtual drive device       Virtual drive system device
-vd_raid_type    Virtual drive RAID         Virtual drive array RAID type
-vd_size         Virtual drive size         Virtual drive array size
+```yaml
+arp_report:
+  enabled: true
+  bmc_api_url: "http://10.100.248.18:8100"
+  bmc_api_key: "sk-operator-def456"
+  interfaces: ""         # empty = scan all non-ignored interfaces
+  scan_timeout: 30       # seconds per interface for arp-scan subprocess
 ```
 
-In the current implementation, the disks attributes ore not updated: if a disk with the correct serial number is found, it's sufficient to consider it as up to date.
+### Device config
 
-To force the reprocessing of the disks extended attributes, the `--force-disk-refresh` command line option can be used: it removes all existing disks to before populating them with the correct parsing. Unless this option is specified, the extended attributes won't be modified unless a disk is replaced.
-
-It is possible to dump the physical/virtual disks map on the filesystem under the JSON notation to ease or automate disks management. The file path has to be provided using the `--dump-disks-map` command line parameter.
-
-
-## Anycast IP
-
-The default behavior of the agent is to assign an interface to an IP.
-So two servers with anycasted IPs, running update mode, would only trigger IP's interface assignement in a loop.
-
-In order to handle this case, user need to set Netbox IP's mode to `Anycast` so that the agent will create another one if it's present on another server.
-
-# Hardware
-
-Tested on:
-
-## Virtual Machines
-
-* Hyper-V
-* VMWare
-* VirtualBox
-* AWS
-* GCP
-
-## [Dell Inc.](https://github.com/Solvik/netbox-agent/blob/master/netbox_agent/vendors/dell.py)
-
-### Blades
-
-* PowerEdge MX7000
-* PowerEdge M1000e (your `DeviceType` should have slots named `Slot 01` and so on)
-* PowerEdge MX740c
-* PowerEdge M640
-* PowerEdge M630
-* PowerEdge M620
-* PowerEdge M610
-
-### Pizzas
-
-* DSS7500
-
-## [HP / HPE](https://github.com/Solvik/netbox-agent/blob/master/netbox_agent/vendors/hp.py)
-
-### Blades
-
-* HP BladeSystem c7000 Enclosure G2 / G3 (your `DeviceType` should have slots named `Bay 1` and so on)
-* HP ProLiant BL460c Gen8
-* HP ProLiant BL460c Gen9
-* HP ProLiant BL460c Gen10
-* HP ProLiant BL460c Gen10 Graphics Exp its expansion HP ProLiant BL460c Graphics Expansion Blade
-* HP Moonshot 1500 Enclosure (your `DeviceType` should have slots batch create with `Bay c[1-45n1]`) with HP ProLiant m750, m710x, m510 Server Cartridge
-
-### Pizzas
-
-* ProLiant DL380p Gen8
-* ProLiant SL4540 Gen8
-* ProLiant SL4540 Gen9
-* ProLiant XL450 Gen10
-
-## [Supermicro](https://github.com/Solvik/netbox-agent/blob/master/netbox_agent/vendors/supermicro.py)
-
-### Blades
-
-* SBI-* and SBA-* should be supported, but I need dmidecode output example to support automatic blade location
-
-### Pizzas
-
-* SSG-6028R
-* SYS-6018R
-
-## [QCT](https://github.com/Solvik/netbox-agent/blob/master/netbox_agent/vendors/qct.py)
-
-### Blades
-
-* QuantaMicro X10E-9N
-
-### Pizzas
-
-* Nothing ATM, feel free to send me a dmidecode or make a PR!
-
-# Known limitations
-
-* The project is only compatible with Linux.
-Since it uses `ethtool` and parses `/sys/` directory, it's not compatible with *BSD distributions.
-* Netbox `>=2.6.0,<=2.6.2` has a caching problem ; if the cache lifetime is too high, the script can get stale data after modification.
-We advise to set `CACHE_TIME` to `0`.
-
-# Developing
-
-If you want to run the agent while adding features or just for debugging purposes
-
-```
-# git clone https://github.com/Solvik/netbox-agent.git
-# cd netbox-agent
-# python3 -m netbox_agent.cli --register
+```yaml
+device:
+  server_role: "Server"
+  default_owner: "FarmGPU"
+  asset_tag_cmd: "dmidecode -s chassis-asset-tag"
+  tags: ""
+  custom_fields: ""
 ```
 
-On a personal note, I use the docker image from [netbox-community/netbox-docker](https://github.com/netbox-community/netbox-docker)
-```
-# git clone https://github.com/netbox-community/netbox-docker
-# cd netbox-docker
-# docker-compose pull
-# docker-compose up
+### Location drivers
+
+```yaml
+# Static site (single datacenter)
+datacenter_location:
+  driver: "cmd:echo datacenter: smf01"
+  regex: "datacenter: (?P<datacenter>[A-Za-z0-9]+)"
+
+# From LLDP switch name
+# datacenter_location:
+#   driver: "cmd:lldpctl"
+#   regex: "SysName: .*\\.([A-Za-z0-9]+)"
+
+# Rack from LLDP
+# rack_location:
+#   driver: "cmd:lldpctl"
+#   regex: "SysName:[ ]+[A-Za-z]+-[A-Za-z]+-([A-Za-z0-9]+)"
 ```
 
-For the linter and code formatting, you need to run:
+---
+
+## Hardware Modules
+
+The Modules API (`--modules`) replaces the legacy Inventory Items approach. Each hardware component is tracked as a NetBox Module with its own serial number, manufacturer, and module type.
+
+### Supported module types
+
+| Category | Detection | Serial Source | Example |
+|----------|-----------|---------------|---------|
+| **CPU** | `lscpu -J` (primary), lshw fallback | None (positional match) | Intel Xeon w9-3545X |
+| **GPU** | lshw, `nvidia-smi` for serials | nvidia-smi query | NVIDIA H200 |
+| **RAM** | lshw memory children | DMI serial | Samsung M321R8GA0PB0-CXYZZ |
+| **SSD/NVMe** | `lsblk -J`, `nvme list` enrichment | Drive serial | Micron MTFDKBA3T8TFH |
+| **NIC** | lshw network | MAC address | Broadcom BCM57504 |
+| **PSU** | DMI type 39 | PSU serial | PWS-2K26A-1R |
+
+### Sync algorithm
+
+1. Detect current hardware via system tools
+2. Compare against last known state (`state.py` diff)
+3. For each module type:
+   - Match by serial number (handles hardware moves between servers)
+   - Positional match for items without serials (CPUs)
+   - Create new modules for unrecognized hardware
+   - Move removed hardware to `SPARE-INVENTORY` device
+
+### Spare device
+
+When hardware is removed from a server (e.g., a GPU is pulled), the module is re-parented to the `SPARE-INVENTORY` device rather than deleted. This preserves the serial number history and makes it easy to track where hardware went.
+
+---
+
+## ARP Neighbor Reporting
+
+The ARP reporter scans the local network for MAC→IP pairs and POSTs them to bmc-api for reconciliation against NetBox. This catches stale BMC IPs on subnets without DHCP.
+
+### How it works
+
 ```
+1. Agent determines interfaces to scan
+   - Explicit list from config, or auto-detect (UP + has IPv4 + not ignored)
+
+2. Scan each interface
+   - Primary: arp-scan --localnet --interface={iface} --plain
+   - Fallback: ip -j neigh show (REACHABLE entries only)
+
+3. Deduplicate pairs (same MAC → keep last IP seen)
+
+4. POST to bmc-api:
+   POST http://bmc-api:8100/arp-pairs
+   {"pairs": [{"mac": "3C:EC:EF:C8:DF:4B", "ip": "10.100.192.50"}, ...],
+    "hostname": "ginger04"}
+
+5. bmc-api reconciles against NetBox
+```
+
+### arp-scan vs ip neigh
+
+| Method | Pros | Cons |
+|--------|------|------|
+| `arp-scan` | Active scan, discovers all L2 neighbors | Requires arp-scan package, needs root |
+| `ip neigh` | Zero dependencies, always available | Passive — only sees hosts this machine has talked to recently |
+
+The agent uses arp-scan when available and falls back to `ip neigh show` automatically. On RHEL/bootc hosts where arp-scan isn't in the repos, the fallback is used.
+
+---
+
+## State-Based Sync
+
+The agent tracks hardware and network state between runs in a JSON file (`/var/lib/netbox-agent/last_state.json`). On subsequent runs, it diffs the current state against the saved state and only syncs categories that changed.
+
+```
+First run:   full sync (no state file)
+Later runs:  diff → only sync changed categories
+```
+
+State includes:
+- Hardware: CPU, GPU, DIMM, SSD, NIC, PSU (keyed by serial or product+vendor)
+- Network: interface names, IP addresses
+- Dependencies: which system tools are available
+
+Atomic writes (temp file + rename) prevent corruption from concurrent runs or crashes.
+
+---
+
+## Systemd Deployment
+
+The Ansible role deploys three services and two timers:
+
+| Unit | Schedule | Action |
+|------|----------|--------|
+| `netbox-agent-boot.service` | On boot (60s delay) | `--update-all` |
+| `netbox-agent-daily.timer` | Daily 3:00 AM (±5min jitter) | `--update-all` |
+| `netbox-agent-network.timer` | Every 4 hours (±2min jitter) | `--network-only` |
+
+The boot service ensures new/rebooted hosts register immediately. The daily timer catches hardware changes. The network timer keeps IPs current.
+
+---
+
+## Device Sync Flow
+
+When the agent runs `--update-all`:
+
+```
+1. Read DMI data (dmidecode)
+   → manufacturer, model, serial, chassis serial, asset tag
+
+2. Detect vendor class (Dell, HP, Supermicro, QCT, Generic)
+
+3. Find or create device in NetBox:
+   a. Search by asset tag (highest priority)
+   b. Search by serial number
+   c. Search by BMC MAC (custom field)
+   d. Create new if not found
+
+4. Set device fields:
+   → platform (auto-detected Linux distro)
+   → custom fields: owner, environment, chassis_serial, bmc_mac_address
+
+5. Sync hardware modules (if --modules):
+   → CPU, GPU, RAM, NIC, SSD, PSU as NetBox Modules
+
+6. Sync network interfaces:
+   → physical, bonding, VLAN interfaces
+   → IPv4 and IPv6 addresses
+   → primary IP (interface with default gateway)
+   → OOB IP (IPMI interface)
+
+7. Sync PSUs:
+   → power ports with max power ratings
+
+8. Run ARP report (if arp_report.enabled):
+   → scan + POST to bmc-api
+
+9. Save state for next diff
+```
+
+---
+
+## RHEL bootc Support
+
+On immutable-root bootc systems (e.g., TractorOS):
+
+- **Install path**: `/var/opt/netbox-agent` (root filesystem is read-only)
+- **Config path**: `/etc/netbox-agent/config.yaml` (`/etc` is writable)
+- **Packages**: `dnf install --transient` (survives until reboot)
+- **arp-scan**: Not available in RHEL repos — uses `ip neigh` fallback
+
+The Ansible role handles this automatically when `netbox_agent_bootc: true` is set.
+
+---
+
+## File Structure
+
+```
+netbox_agent/
+├── cli.py               # Entry point, vendor detection, orchestration
+├── config.py            # Config parsing (YAML + env + CLI args)
+├── server.py            # Device create/update, NetBox sync orchestration
+├── modules.py           # Modules API: CPU, GPU, RAM, NIC, SSD, PSU
+├── network.py           # Network interface and IP sync
+├── power.py             # PSU detection and power port management
+├── arp_reporter.py      # ARP scan + POST to bmc-api
+├── state.py             # State-based diff tracking between runs
+├── inventory.py         # Legacy inventory items (deprecated)
+├── dmidecode.py         # DMI data parsing
+├── lshw.py              # lshw JSON parsing
+├── ethtool.py           # ethtool output parsing
+├── ipmi.py              # IPMI FRU data + asset tag reading
+├── lldp.py              # LLDP neighbor parsing for auto-cabling
+├── location.py          # Datacenter/rack/slot location drivers
+├── hypervisor.py        # VM and hypervisor cluster management
+├── logging.py           # Logging setup
+├── misc.py              # Utility functions
+├── dependencies.py      # System dependency detection
+├── drivers/
+│   ├── cmd.py           # Shell command driver
+│   └── file.py          # File-based driver
+├── vendors/
+│   ├── dell.py          # Dell PowerEdge specifics
+│   ├── hp.py            # HP/HPE ProLiant specifics
+│   ├── supermicro.py    # Supermicro specifics
+│   ├── qct.py           # QCT QuantaMicro specifics
+│   └── generic.py       # Fallback for unknown vendors
+└── raid/
+    ├── base.py          # RAID controller base class
+    ├── hp.py            # HP Smart Array (hpssacli)
+    ├── storcli.py       # Broadcom MegaRAID (storcli)
+    └── omreport.py      # Dell OMSA (omreport)
+```
+
+---
+
+## Tested Hardware
+
+### FarmGPU fleet
+
+| Codename | Model | Vendor | Count | Notes |
+|-----------|-------|--------|-------|-------|
+| Ginger | SSG-222B-NE3X24R | Supermicro | 6 | VAST storage, 24× NVMe |
+| Potato | SYS-212H-TN | Supermicro | 7 | MinIO Exapod, RHEL bootc |
+
+### Upstream (Solvik)
+
+- Dell: PowerEdge MX7000, M1000e, MX740c, M640, M630, M620, M610, DSS7500
+- HP/HPE: BladeSystem c7000, ProLiant BL460c Gen8-10, Moonshot 1500, DL380p, SL4540, XL450
+- Supermicro: SBI/SBA blades, SSG-6028R, SYS-6018R
+- QCT: QuantaMicro X10E-9N
+- VMs: Hyper-V, VMWare, VirtualBox, AWS, GCP
+
+---
+
+## Development
+
+```bash
+git clone git@github.com:FarmGPU/netbox-agent.git
+cd netbox-agent
+git checkout ethan
+python3 -m venv venv
+source venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Linting
+
+```bash
 ruff check
 ruff format
 ```
+
+### Testing
+
+```bash
+pytest tests/ -v
+```
+
+---
+
+## Known Limitations
+
+- Linux only (uses `ethtool`, `/sys/` parsing)
+- Requires root access for `dmidecode`, `ipmitool`, `arp-scan`
+- LLDP auto-cabling requires `lldpd` running (disabled by default)
+- Legacy inventory items (`inventory: true`) are deprecated — use `modules: true`
+- CPU modules lack serial numbers — matched by position only
+- `ip neigh` fallback only discovers hosts with recent REACHABLE ARP entries
+
+---
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE)
