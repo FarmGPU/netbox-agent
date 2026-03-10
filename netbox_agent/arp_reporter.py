@@ -27,7 +27,10 @@ def _scan_arp_scan(interface: str, timeout: int) -> list[tuple[str, str]]:
 
     Args:
         interface: Network interface name (e.g., "ens4035f0np0").
-        timeout: Timeout in seconds for the scan.
+        timeout: Total timeout in seconds for the scan subprocess.
+            arp-scan's per-host probe timeout is fixed at 500ms (default).
+            This timeout controls how long we wait for the entire scan to
+            complete before killing the subprocess.
 
     Returns:
         List of (MAC, IP) tuples discovered on the interface.
@@ -35,9 +38,8 @@ def _scan_arp_scan(interface: str, timeout: int) -> list[tuple[str, str]]:
     pairs = []
     try:
         result = subprocess.run(
-            ["arp-scan", "--localnet", f"--interface={interface}",
-             f"--timeout={timeout * 1000}", "--plain"],
-            capture_output=True, text=True, timeout=timeout + 10,
+            ["arp-scan", "--localnet", f"--interface={interface}", "--plain"],
+            capture_output=True, text=True, timeout=timeout,
         )
         for line in result.stdout.strip().splitlines():
             # arp-scan --plain output: IP\tMAC\tVendor (or IP\tMAC)
