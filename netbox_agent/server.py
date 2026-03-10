@@ -631,8 +631,8 @@ class ServerBase:
                 config.register or config.update_all or config.update_inventory
             )
             # update inventory if feature is enabled (legacy Inventory Items)
-            self.inventory = Inventory(server=self)
             if update_inventory:
+                self.inventory = Inventory(server=self)
                 self.inventory.create_or_update()
             # update modules if feature is enabled (new Modules API)
             update_modules = getattr(config, "modules", False) and (

@@ -536,7 +536,7 @@ class Inventory:
             self.create_netbox_gpus(gpus)
 
     def create_or_update(self):
-        if config.inventory is None or config.update_inventory is None:
+        if not config.inventory:
             return False
         if self.update_expansion is False:
             self.do_netbox_cpus()
