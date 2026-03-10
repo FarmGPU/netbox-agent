@@ -35,7 +35,8 @@ Forked from [Solvik/netbox-agent](https://github.com/Solvik/netbox-agent). This 
 | `dmidecode` | Hardware identity (serial, manufacturer, model) |
 | `ipmitool` | IPMI/BMC interface and asset tag reading |
 | `lshw` | Hardware enumeration (GPU, NIC, storage, memory) |
-| `arp-scan` | ARP neighbor discovery (optional — falls back to `ip neigh`) |
+| `arp-scan` | ARP neighbor discovery (optional — falls back to `nmap`, then `ip neigh`) |
+| `nmap` | ARP discovery via ping scan (optional — used when `arp-scan` unavailable) |
 
 ### Python dependencies
 
@@ -229,9 +230,10 @@ The ARP reporter scans the local network for MAC→IP pairs and POSTs them to bm
 1. Agent determines interfaces to scan
    - Explicit list from config, or auto-detect (UP + has IPv4 + not ignored)
 
-2. Scan each interface
-   - Primary: arp-scan --localnet --interface={iface} --plain
-   - Fallback: ip -j neigh show (REACHABLE entries only)
+2. Scan each interface using 3-tier fallback:
+   - Tier 1: arp-scan --localnet --interface={iface} --plain
+   - Tier 2: nmap -sn -oX - -e {iface} {subnet_cidr}
+   - Tier 3: ip -j neigh show (REACHABLE entries only)
 
 3. Deduplicate pairs (same MAC → keep last IP seen)
 
@@ -243,14 +245,15 @@ The ARP reporter scans the local network for MAC→IP pairs and POSTs them to bm
 5. bmc-api reconciles against NetBox
 ```
 
-### arp-scan vs ip neigh
+### Scan method comparison
 
-| Method | Pros | Cons |
-|--------|------|------|
-| `arp-scan` | Active scan, discovers all L2 neighbors | Requires arp-scan package, needs root |
-| `ip neigh` | Zero dependencies, always available | Passive — only sees hosts this machine has talked to recently |
+| Tier | Tool | Speed (/24) | Completeness | Availability |
+|------|------|-------------|-------------|--------------|
+| 1 | `arp-scan` | ~3s | Best (active ARP, all hosts) | Debian/EPEL 9 only |
+| 2 | `nmap -sn` | ~10-15s | Good (active ARP, most hosts) | RHEL AppStream + Debian |
+| 3 | `ip neigh` | instant | Poor (passive cache, REACHABLE only) | Everywhere (iproute2) |
 
-The agent uses arp-scan when available and falls back to `ip neigh show` automatically. On RHEL/bootc hosts where arp-scan isn't in the repos, the fallback is used.
+The agent selects the first available tool. On Debian/Ubuntu hosts with `arp-scan`, tier 1 is used. On RHEL bootc hosts (where `arp-scan` isn't in the repos), `nmap` provides active ARP discovery as tier 2. The `ip neigh` fallback is a last resort for hosts with neither tool.
 
 ---
 
@@ -333,7 +336,7 @@ On immutable-root bootc systems (e.g., TractorOS):
 - **Install path**: `/var/opt/netbox-agent` (root filesystem is read-only)
 - **Config path**: `/etc/netbox-agent/config.yaml` (`/etc` is writable)
 - **Packages**: `dnf install --transient` (survives until reboot)
-- **arp-scan**: Not available in RHEL repos — uses `ip neigh` fallback
+- **arp-scan**: Not available in RHEL repos — uses `nmap -sn` for ARP discovery instead
 
 The Ansible role handles this automatically when `netbox_agent_bootc: true` is set.
 
@@ -432,7 +435,7 @@ pytest tests/ -v
 - LLDP auto-cabling requires `lldpd` running (disabled by default)
 - Legacy inventory items (`inventory: true`) are deprecated — use `modules: true`
 - CPU modules lack serial numbers — matched by position only
-- `ip neigh` fallback only discovers hosts with recent REACHABLE ARP entries
+- `ip neigh` last-resort fallback only discovers hosts with recent REACHABLE ARP entries
 
 ---
 

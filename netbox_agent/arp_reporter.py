@@ -1,7 +1,12 @@
 """ARP neighbor discovery and reporting to bmc-api.
 
-Scans local network interfaces for MAC→IP neighbor pairs using arp-scan
-(preferred) with fallback to kernel neighbor table (ip neigh show).
+Scans local network interfaces for MAC→IP neighbor pairs using a 3-tier
+fallback chain:
+
+  1. arp-scan  — active ARP, best coverage (~3s /24)
+  2. nmap -sn  — active ARP via ping scan, good coverage (~10-15s /24)
+  3. ip neigh  — passive kernel cache, REACHABLE only (instant but poor)
+
 Posts discovered pairs to bmc-api's /arp-pairs endpoint for reconciliation
 against NetBox.
 """
@@ -13,6 +18,7 @@ import re
 import shutil
 import socket
 import subprocess
+import xml.etree.ElementTree as ET
 
 import requests
 
@@ -53,6 +59,79 @@ def _scan_arp_scan(interface: str, timeout: int) -> list[tuple[str, str]]:
         logging.warning("arp-scan timed out on %s after %ds", interface, timeout)
     except Exception as exc:
         logging.warning("arp-scan failed on %s: %s", interface, exc)
+    return pairs
+
+
+def _has_nmap() -> bool:
+    """Check if nmap is installed."""
+    return shutil.which("nmap") is not None
+
+
+def _get_interface_cidr(interface: str) -> str | None:
+    """Derive the CIDR subnet for an interface (e.g. '10.100.192.0/24').
+
+    Uses netifaces for the IPv4 address and netaddr for CIDR calculation.
+    Both are existing project dependencies.
+
+    Returns:
+        CIDR string, or None if the interface has no IPv4 address.
+    """
+    try:
+        import netifaces
+        from netaddr import IPNetwork
+
+        addrs = netifaces.ifaddresses(interface).get(netifaces.AF_INET, [])
+        if not addrs:
+            return None
+        addr = addrs[0]["addr"]
+        # netifaces uses "netmask", netifaces2 uses "mask"
+        netmask = addrs[0].get("netmask") or addrs[0].get("mask")
+        network = IPNetwork(f"{addr}/{netmask}")
+        return str(network.cidr)
+    except Exception as exc:
+        logging.warning("Could not determine CIDR for %s: %s", interface, exc)
+        return None
+
+
+def _scan_nmap(interface: str, timeout: int) -> list[tuple[str, str]]:
+    """Run nmap -sn on an interface and return (MAC, IP) pairs.
+
+    nmap's -sn (ping scan) performs ARP discovery when run as root on a
+    local subnet.  XML output (-oX -) is parsed for host entries that
+    contain both an ipv4 and a mac address element.
+
+    Args:
+        interface: Network interface name (e.g., "ens4035f0np0").
+        timeout: Total timeout in seconds for the scan subprocess.
+
+    Returns:
+        List of (MAC, IP) tuples discovered on the interface.
+    """
+    pairs: list[tuple[str, str]] = []
+    cidr = _get_interface_cidr(interface)
+    if cidr is None:
+        logging.warning("nmap: skipping %s — no CIDR available", interface)
+        return pairs
+    try:
+        result = subprocess.run(
+            ["nmap", "-sn", "-oX", "-", "-e", interface, cidr],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        root = ET.fromstring(result.stdout)
+        for host in root.findall("host"):
+            ipv4 = None
+            mac = None
+            for addr in host.findall("address"):
+                if addr.get("addrtype") == "ipv4":
+                    ipv4 = addr.get("addr")
+                elif addr.get("addrtype") == "mac":
+                    mac = addr.get("addr")
+            if mac and ipv4 and len(mac) == 17 and ":" in mac:
+                pairs.append((mac.upper(), ipv4))
+    except subprocess.TimeoutExpired:
+        logging.warning("nmap timed out on %s after %ds", interface, timeout)
+    except Exception as exc:
+        logging.warning("nmap scan failed on %s: %s", interface, exc)
     return pairs
 
 
@@ -161,6 +240,7 @@ def scan_and_report(config) -> dict:
 
     interfaces = _get_scan_interfaces(config)
     use_arp_scan = _has_arp_scan()
+    use_nmap = not use_arp_scan and _has_nmap()
 
     all_pairs: dict[str, str] = {}  # MAC → IP (dedup: last seen wins)
 
@@ -170,12 +250,22 @@ def scan_and_report(config) -> dict:
             for mac, ip in pairs:
                 all_pairs[mac] = ip
             logging.debug("arp-scan on %s: %d pairs", iface, len(pairs))
+        method = "arp-scan"
+    elif use_nmap:
+        logging.info("arp-scan not found, using nmap -sn for ARP discovery")
+        for iface in interfaces:
+            pairs = _scan_nmap(iface, scan_timeout)
+            for mac, ip in pairs:
+                all_pairs[mac] = ip
+            logging.debug("nmap on %s: %d pairs", iface, len(pairs))
+        method = "nmap"
     else:
-        # Fallback: ip neigh covers all interfaces at once
-        logging.info("arp-scan not found, falling back to ip neigh show")
+        # Last resort: ip neigh covers all interfaces at once
+        logging.info("arp-scan and nmap not found, falling back to ip neigh show")
         pairs = _scan_ip_neigh()
         for mac, ip in pairs:
             all_pairs[mac] = ip
+        method = "ip-neigh"
 
     pairs_list = [{"mac": mac, "ip": ip} for mac, ip in all_pairs.items()]
     hostname = socket.gethostname()
@@ -185,7 +275,7 @@ def scan_and_report(config) -> dict:
         "pairs_found": len(all_pairs),
         "pairs_submitted": 0,
         "response": None,
-        "method": "arp-scan" if use_arp_scan else "ip-neigh",
+        "method": method,
     }
 
     if not pairs_list:
