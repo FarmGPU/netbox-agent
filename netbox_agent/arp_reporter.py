@@ -194,8 +194,8 @@ def _get_scan_interfaces(config) -> list[str]:
     for iface in sorted(os.listdir("/sys/class/net/")):
         if not os.path.islink(f"/sys/class/net/{iface}"):
             continue
-        # Always skip loopback — scanning 127.0.0.0/8 is useless and slow
-        if iface == "lo":
+        # Skip virtual/non-physical interfaces that waste scan time
+        if iface in ("lo", "podman0", "virbr0", "cni0", "flannel.1"):
             continue
         if ignore_re and re.match(ignore_re, iface):
             continue
