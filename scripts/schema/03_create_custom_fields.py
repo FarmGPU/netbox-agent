@@ -87,6 +87,15 @@ def run(nb):
             "description": "Comma-separated list of tools missing on this server (auto-populated by netbox-agent)",
             "weight": 700,
         },
+        {
+            "name": "last_agent_sync",
+            "label": "Last Agent Sync",
+            "type": "datetime",
+            "object_types": ["dcim.device"],
+            "required": False,
+            "description": "Timestamp of last successful netbox-agent sync (auto-populated)",
+            "weight": 800,
+        },
     ]
 
     for field_def in fields:

@@ -4,6 +4,7 @@ import subprocess
 import logging
 import socket
 import sys
+from datetime import datetime, timezone
 
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
@@ -225,6 +226,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
             custom_fields=self.custom_fields,
         )
@@ -249,6 +251,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
             custom_fields=self.custom_fields,
         )
@@ -273,6 +276,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
         )
         return new_blade
@@ -316,6 +320,9 @@ class ServerBase:
         if chassis_serial:
             cf["chassis_serial"] = chassis_serial
 
+        # Set last_agent_sync at creation time
+        cf["last_agent_sync"] = datetime.now(timezone.utc).isoformat()
+
         create_kwargs = dict(
             name=hostname,
             serial=serial,
@@ -325,6 +332,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
             custom_fields=cf,
         )
@@ -709,8 +717,28 @@ class ServerBase:
         if bmc_mac:
             local_cf["bmc_mac_address"] = bmc_mac
 
+        # Always update last_agent_sync timestamp on successful sync
+        local_cf["last_agent_sync"] = datetime.now(timezone.utc).isoformat()
+
         if server.custom_fields != local_cf:
             server.custom_fields = local_cf
+            update += 1
+
+        # Transition device to "active" on successful agent sync.
+        # Only transition from inventory/staged/offline — never override
+        # manual statuses like failed or decommissioning.
+        _ACTIVATABLE_STATUSES = {"inventory", "staged", "planned", "offline"}
+        current_status = getattr(server, "status", None)
+        # pynetbox returns status as a Record with .value attribute
+        current_status_value = (
+            current_status.value if hasattr(current_status, "value") else current_status
+        )
+        if current_status_value in _ACTIVATABLE_STATUSES:
+            logging.info(
+                "Transitioning device '%s' status: %s → active",
+                server.name, current_status_value,
+            )
+            server.status = "active"
             update += 1
 
         if config.update_all or config.update_location:
