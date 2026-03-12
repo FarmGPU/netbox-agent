@@ -11,6 +11,7 @@ def get_config():
     p = jsonargparse.ArgumentParser(
         default_config_files=[
             "/etc/netbox_agent.yaml",
+            "/etc/netbox-agent/config.yaml",
             "~/.config/netbox_agent.yaml",
             "~/.netbox_agent.yaml",
         ],
