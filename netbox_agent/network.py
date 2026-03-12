@@ -409,7 +409,10 @@ class Network(object):
                 "status": "active",
                 "assigned_object_type": self.assigned_object_type,
                 "assigned_object_id": interface.id,
+                "dns_name": self._ip_dns_name(),
             }
+            if self.tenant:
+                query_params["tenant"] = self.tenant.id
             try:
                 netbox_ip = nb.ipam.ip_addresses.create(**query_params)
             except Exception as e:
@@ -420,9 +423,7 @@ class Network(object):
                     netbox_ips = list(nb.ipam.ip_addresses.filter(address=bare_ip))
                     if netbox_ips:
                         netbox_ip = netbox_ips[0]
-                        netbox_ip.assigned_object_type = self.assigned_object_type
-                        netbox_ip.assigned_object_id = interface.id
-                        netbox_ip.save()
+                        self._enrich_ip(netbox_ip, interface)
                         return netbox_ip
                 raise
             return netbox_ip
@@ -451,6 +452,7 @@ class Network(object):
                     "tenant": self.tenant.id if self.tenant else None,
                     "assigned_object_type": self.assigned_object_type,
                     "assigned_object_id": interface.id,
+                    "dns_name": self._ip_dns_name(),
                 }
                 netbox_ip = nb.ipam.ip_addresses.create(**query_params)
             return netbox_ip
@@ -474,11 +476,48 @@ class Network(object):
                     )
                 )
             else:
+                # IP already on correct interface — still update dns_name/tenant
+                self._enrich_existing_ip(netbox_ip)
                 return netbox_ip
 
-            netbox_ip.assigned_object_type = self.assigned_object_type
-            netbox_ip.assigned_object_id = interface.id
+            self._enrich_ip(netbox_ip, interface)
+            return netbox_ip
+
+    def _ip_dns_name(self):
+        """Return the hostname to use as dns_name on IP addresses."""
+        try:
+            return self.server.get_hostname()
+        except Exception:
+            return ""
+
+    def _enrich_existing_ip(self, netbox_ip):
+        """Update dns_name and tenant on an IP that is already correctly assigned.
+
+        Only saves if something actually changed to avoid unnecessary API calls.
+        """
+        dirty = False
+        dns = self._ip_dns_name()
+        if dns and getattr(netbox_ip, "dns_name", None) != dns:
+            netbox_ip.dns_name = dns
+            dirty = True
+        if self.tenant and getattr(netbox_ip, "tenant", None) != self.tenant:
+            netbox_ip.tenant = self.tenant.id
+            dirty = True
+        if dirty:
+            logging.info("Enriching IP %s: dns_name=%s tenant=%s",
+                         netbox_ip.address, dns, self.tenant)
             netbox_ip.save()
+
+    def _enrich_ip(self, netbox_ip, interface):
+        """Set dns_name, tenant, and interface assignment on an existing IP."""
+        netbox_ip.assigned_object_type = self.assigned_object_type
+        netbox_ip.assigned_object_id = interface.id
+        dns = self._ip_dns_name()
+        if dns and getattr(netbox_ip, "dns_name", None) != dns:
+            netbox_ip.dns_name = dns
+        if self.tenant and getattr(netbox_ip, "tenant", None) != self.tenant:
+            netbox_ip.tenant = self.tenant.id
+        netbox_ip.save()
 
     def _nic_identifier(self, nic):
         if isinstance(nic, dict):
