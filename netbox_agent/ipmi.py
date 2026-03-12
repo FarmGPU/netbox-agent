@@ -2,7 +2,9 @@
 IPMI LAN channel parser.
 
 Probes multiple BMC channels (1, 2, 8) and normalizes the OOB IP to /32.
-Returns empty dict when ipmitool is missing or no valid IP is found.
+Returns interface dict with MAC even when IP is unassigned (0.0.0.0) so
+the IPMI interface is visible in NetBox.  Returns empty dict only when
+ipmitool is missing or no channel responds with a valid MAC.
 """
 
 import logging
@@ -33,18 +35,26 @@ class IPMI:
             if ret != 0:
                 continue
 
-            # Check for a real IP (not 0.0.0.0)
-            ip = self._extract_field(output, "IP Address")
-            if ip and ip != "0.0.0.0":
+            # Accept channel if it has a valid MAC (IP may be 0.0.0.0)
+            mac = self._extract_field(output, "MAC Address")
+            if mac and mac != "00:00:00:00:00:00":
                 self.output = output
                 self.channel = ch
-                logger.debug("IPMI: valid response on channel %d (IP=%s)", ch, ip)
+                ip = self._extract_field(output, "IP Address") or "0.0.0.0"
+                logger.debug(
+                    "IPMI: valid response on channel %d (MAC=%s, IP=%s)", ch, mac, ip
+                )
                 break
         else:
             logger.warning("IPMI: no valid response on channels %s", _CHANNELS)
 
     def parse(self):
-        """Parse IPMI output into a network interface dict."""
+        """Parse IPMI output into a network interface dict.
+
+        Returns interface dict with MAC always.  The ``ip`` list is empty
+        when the BMC has no assigned IP (0.0.0.0), so the IPMI interface
+        still appears in NetBox with its MAC for visibility.
+        """
         if not self.output:
             return {}
 
@@ -61,21 +71,22 @@ class IPMI:
                 mac = mac.upper()
             vlan_raw = fields.get("802.1q VLAN ID", "Disabled")
             vlan = int(vlan_raw) if vlan_raw != "Disabled" else None
-            ip = fields["IP Address"]
         except KeyError as e:
             logger.error("IPMI decoding failed, missing: %s", e.args[0])
             return {}
 
-        if not ip or ip == "0.0.0.0":
-            return {}
-
-        # Normalize to /32 — BMC API uses /32 for OOB IPs
-        address = f"{ip}/32"
+        # Build IP list — empty when BMC has no assigned IP
+        ip = fields.get("IP Address", "")
+        ip_list = []
+        if ip and ip != "0.0.0.0":
+            ip_list = [f"{ip}/32"]
+        else:
+            logger.info("IPMI: MAC=%s but IP unassigned (0.0.0.0) — interface created without IP", mac)
 
         return {
             "name": "IPMI",
             "mac": mac,
-            "ip": [address],
+            "ip": ip_list,
             "vlan": vlan,
             "mtu": 1500,
             "bonding": False,
