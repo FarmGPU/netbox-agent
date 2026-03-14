@@ -292,6 +292,94 @@ class ServerBase:
                 server.serial = serial
                 server.save()
 
+    def _refine_role(self, server):
+        """Refine generic 'Server' role to GPU/CPU/Storage Server based on hardware.
+
+        Only refines when the current role is generic 'Server'.
+        Never downgrades from a more specific role (e.g., won't change
+        'GPU Server' to 'CPU Server' if nvidia-smi fails).
+        """
+        current_role = server.role
+        if not current_role:
+            return
+
+        role_name = current_role.name if hasattr(current_role, 'name') else str(current_role)
+        if role_name != "Server":
+            return  # Already refined or manually set — don't touch
+
+        # Detect hardware to determine refined role
+        new_role_name = self._detect_server_type()
+        if new_role_name and new_role_name != "Server":
+            role = nb.dcim.device_roles.get(name=new_role_name)
+            if role:
+                server.role = role.id
+                server.save()
+                logging.info(
+                    "Refined role for '%s': Server → %s",
+                    server.name, new_role_name,
+                )
+            else:
+                logging.warning(
+                    "Role '%s' not found in NetBox — skipping refinement for '%s'",
+                    new_role_name, server.name,
+                )
+
+    # Vendors/keywords for filtering onboard VGA from real GPUs
+    _SKIP_GPU_VENDORS = {"aspeed technology, inc.", "matrox electronics systems ltd."}
+    _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
+
+    def _detect_server_type(self) -> str:
+        """Determine server type from hardware.
+
+        Returns: 'GPU Server', 'CPU Server', or 'Storage Server'.
+        """
+        # Check for GPUs
+        has_gpus = False
+        try:
+            from netbox_agent.lshw import LSHW
+            lshw = LSHW()
+            gpus = lshw.get_hw_linux("gpu")
+            real_gpus = []
+            for gpu in gpus:
+                vendor = gpu.get("vendor", "").lower()
+                product = gpu.get("product", "").lower()
+                description = gpu.get("description", "")
+                if vendor in self._SKIP_GPU_VENDORS:
+                    continue
+                if any(kw in product for kw in self._SKIP_GPU_KEYWORDS):
+                    continue
+                if "VGA compatible" in description and "3D" not in description:
+                    continue
+                real_gpus.append(gpu)
+            has_gpus = len(real_gpus) > 0
+        except Exception as e:
+            logging.warning("GPU detection failed during role refinement: %s", e)
+
+        if has_gpus:
+            return "GPU Server"
+
+        # Check for bulk storage (Storage Server indicator)
+        has_bulk_storage = False
+        try:
+            output = subprocess.check_output(
+                ["lsblk", "-J", "-b", "-d", "-o", "NAME,TYPE,SIZE"],
+                encoding="utf-8", timeout=10,
+            )
+            data = json.loads(output)
+            disks = [d for d in data.get("blockdevices", [])
+                     if d.get("type") == "disk"
+                     and not d.get("name", "").startswith(("loop", "ram", "zram"))]
+            # 8+ physical disks suggests storage server
+            has_bulk_storage = len(disks) >= 8
+        except Exception as e:
+            logging.warning("Storage detection failed during role refinement: %s", e)
+
+        if has_bulk_storage:
+            return "Storage Server"
+
+        # Default: CPU Server (no GPUs, no bulk storage)
+        return "CPU Server"
+
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
         device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
@@ -751,6 +839,9 @@ class ServerBase:
 
         if update:
             server.save()
+
+        # Refine generic "Server" role based on detected hardware
+        self._refine_role(server)
 
         if expansion:
             update = 0
