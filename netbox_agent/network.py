@@ -17,6 +17,113 @@ from netbox_agent.lldp import LLDP
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
 
 
+def _sync_transceiver_module(device_id, interface, ethtool_data):
+    """Create or update a transceiver Module linked to an interface.
+
+    Creates: Module Type (if new) → Module Bay → Module → links to Interface.
+    Skips if no transceiver data, or if interface already has a module linked.
+
+    Args:
+        device_id: NetBox device ID
+        interface: pynetbox interface object
+        ethtool_data: dict from Ethtool.parse() with transceiver_* fields
+    """
+    if not ethtool_data or not isinstance(ethtool_data, dict):
+        return
+
+    vendor = (ethtool_data.get("transceiver_vendor") or "").strip()
+    part_number = (ethtool_data.get("transceiver_part_number") or "").strip()
+    serial = (ethtool_data.get("transceiver_serial") or "").strip()
+    form_factor = (ethtool_data.get("transceiver_type") or
+                   ethtool_data.get("form_factor") or "").strip()
+
+    # Need at least vendor or part number to create a module type
+    if not vendor and not part_number:
+        return
+
+    # Use form factor + part number as model name
+    model = part_number or form_factor or "Unknown Transceiver"
+    if not vendor:
+        vendor = "Unknown"
+
+    # Skip if interface already has a module
+    if getattr(interface, "module", None):
+        return
+
+    try:
+        # Find or create manufacturer
+        mfr_slug = vendor.lower().replace(" ", "-").replace(".", "")[:50]
+        mfr = nb.dcim.manufacturers.get(slug=mfr_slug)
+        if not mfr:
+            mfr = nb.dcim.manufacturers.get(name=vendor)
+        if not mfr:
+            mfr = nb.dcim.manufacturers.create(name=vendor, slug=mfr_slug)
+            logging.info("Created manufacturer: %s", vendor)
+
+        # Find or create module type
+        module_type = None
+        if part_number:
+            existing = list(nb.dcim.module_types.filter(
+                part_number=part_number, manufacturer_id=mfr.id))
+            if existing:
+                module_type = existing[0]
+        if not module_type:
+            existing = list(nb.dcim.module_types.filter(
+                model=model, manufacturer_id=mfr.id))
+            if existing:
+                module_type = existing[0]
+        if not module_type:
+            module_type = nb.dcim.module_types.create(
+                manufacturer=mfr.id,
+                model=model,
+                part_number=part_number,
+            )
+            logging.info("Created module type: %s %s", vendor, model)
+
+        # Find or create module bay
+        bay_name = "%s-xcvr" % interface.name
+        bays = list(nb.dcim.module_bays.filter(device_id=device_id, name=bay_name))
+        if bays:
+            bay = bays[0]
+        else:
+            bay = nb.dcim.module_bays.create(device=device_id, name=bay_name)
+
+        # Check if module already exists by serial on this device
+        if serial:
+            existing_modules = list(nb.dcim.modules.filter(
+                serial=serial, device_id=device_id))
+            if existing_modules:
+                module = existing_modules[0]
+                if module.module_bay and module.module_bay.id != bay.id:
+                    module.module_bay = bay.id
+                    module.save()
+                interface.module = module.id
+                interface.save()
+                return
+
+        # Create new module
+        module = nb.dcim.modules.create(
+            device=device_id,
+            module_bay=bay.id,
+            module_type=module_type.id,
+            serial=serial or "",
+        )
+
+        # Link interface to module
+        interface.module = module.id
+        interface.save()
+
+        logging.info(
+            "Created transceiver module: %s %s (SN:%s) on %s",
+            vendor, model, serial, interface.name,
+        )
+    except Exception:
+        logging.debug(
+            "Failed to create transceiver module for %s", interface.name,
+            exc_info=True,
+        )
+
+
 def _build_transceiver_description(ethtool_data):
     """Build a human-readable transceiver description from ethtool module data.
 
@@ -432,6 +539,11 @@ class Network(object):
                 )
                 if nic_update:
                     interface.save()
+
+        # Create transceiver Module if ethtool reports module info
+        if not isinstance(self, VirtualNetwork) and nic.get("ethtool"):
+            _sync_transceiver_module(self.device.id, interface, nic["ethtool"])
+
         return interface
 
     def create_or_update_netbox_ip_on_interface(self, ip, interface):
@@ -762,12 +874,15 @@ class Network(object):
                     interface.type = _type
                     nic_update += 1
 
-            # Update transceiver description if ethtool reports module info
+            # Update transceiver description and create Module if ethtool reports module info
             if not isinstance(self, VirtualNetwork) and nic.get("ethtool"):
                 transceiver_desc = _build_transceiver_description(nic["ethtool"])
                 if transceiver_desc and (interface.description or "") != transceiver_desc:
                     interface.description = transceiver_desc
                     nic_update += 1
+
+                # Create transceiver Module linked to this interface
+                _sync_transceiver_module(self.device.id, interface, nic["ethtool"])
 
             if hasattr(interface, "lag") and interface.lag is not None:
                 local_lag_int = next(
