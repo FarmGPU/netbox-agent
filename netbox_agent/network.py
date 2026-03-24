@@ -17,6 +17,56 @@ from netbox_agent.lldp import LLDP
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
 
 
+def _build_transceiver_description(ethtool_data):
+    """Build a human-readable transceiver description from ethtool module data.
+
+    Returns a string like "QSFP28 | Mellanox MCP1600-C003E30N (SN: MT2117VS05677) | 3m copper"
+    or None if no transceiver data is available.
+    """
+    if not ethtool_data or not isinstance(ethtool_data, dict):
+        return None
+
+    parts = []
+
+    # Form factor (QSFP28, SFP+, etc.)
+    form = ethtool_data.get("transceiver_type") or ethtool_data.get("form_factor")
+    if form:
+        parts.append(form)
+
+    # Vendor + part number
+    vendor = ethtool_data.get("transceiver_vendor", "").strip()
+    pn = ethtool_data.get("transceiver_part_number", "").strip()
+    sn = ethtool_data.get("transceiver_serial", "").strip()
+    if vendor or pn:
+        vendor_str = "%s %s" % (vendor, pn) if vendor and pn else (vendor or pn)
+        if sn:
+            vendor_str += " (SN: %s)" % sn
+        parts.append(vendor_str)
+
+    # Cable length
+    for length_key in ("transceiver_length_copper", "transceiver_length_om3",
+                       "transceiver_length_om4", "transceiver_length_smf"):
+        length = ethtool_data.get(length_key, "").strip()
+        if length and length != "0m" and length != "0":
+            connector = ethtool_data.get("transceiver_connector", "").strip()
+            transmitter = ethtool_data.get("transceiver_transmitter", "").strip()
+            if "copper" in (connector + transmitter).lower():
+                parts.append("%s copper" % length)
+            else:
+                parts.append("%s fiber" % length)
+            break
+
+    # Wavelength (for fiber optics)
+    wavelength = ethtool_data.get("transceiver_wavelength", "").strip()
+    if wavelength and "nm" in wavelength:
+        parts.append(wavelength)
+
+    if not parts:
+        return None
+
+    return " | ".join(parts)
+
+
 class Network(object):
     def __init__(self, server, *args, **kwargs):
         self.nics = []
@@ -321,7 +371,6 @@ class Network(object):
         return list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
 
     def create_netbox_nic(self, nic, mgmt=False):
-        # TODO: add Optic Vendor, PN and Serial
         nic_type = self.get_netbox_type_for_nic(nic)
         logging.info(
             "Creating NIC {name} ({mac}) on {device}".format(
@@ -347,6 +396,11 @@ class Network(object):
 
         if nic.get("ethtool") and nic["ethtool"].get("link") == "no":
             params["enabled"] = False
+
+        # Add transceiver info to description if available
+        transceiver_desc = _build_transceiver_description(nic.get("ethtool"))
+        if transceiver_desc:
+            params["description"] = transceiver_desc
 
         interface = self.nb_net.interfaces.create(**params)
 
@@ -706,6 +760,13 @@ class Network(object):
                 if not interface.type or _type != interface.type.value:
                     logging.info("Interface type is wrong, resetting")
                     interface.type = _type
+                    nic_update += 1
+
+            # Update transceiver description if ethtool reports module info
+            if not isinstance(self, VirtualNetwork) and nic.get("ethtool"):
+                transceiver_desc = _build_transceiver_description(nic["ethtool"])
+                if transceiver_desc and (interface.description or "") != transceiver_desc:
+                    interface.description = transceiver_desc
                     nic_update += 1
 
             if hasattr(interface, "lag") and interface.lag is not None:
