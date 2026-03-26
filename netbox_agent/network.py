@@ -300,7 +300,12 @@ class Network(object):
         return len(parts) == 6 and all(len(p) == 2 for p in parts)
 
     def update_interface_macs(self, nic, macs):
-        nb_macs = list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
+        # MAC addresses are always under the DCIM API, even for VM interfaces
+        # But the filter parameter differs: interface_id for DCIM, vminterface_id for VMs
+        if self.assigned_object_type == "virtualization.vminterface":
+            nb_macs = list(nb.dcim.mac_addresses.filter(vminterface_id=nic.id))
+        else:
+            nb_macs = list(nb.dcim.mac_addresses.filter(interface_id=nic.id))
         # Clean
         for nb_mac in nb_macs:
             if nb_mac.mac_address not in macs:
@@ -314,10 +319,10 @@ class Network(object):
                 continue
             if mac not in {nb_mac.mac_address for nb_mac in nb_macs}:
                 logging.debug("Adding MAC {mac} to {nic}".format(mac=mac, nic=nic))
-                self.nb_net.mac_addresses.create(
+                nb.dcim.mac_addresses.create(
                     {
                         "mac_address": mac,
-                        "assigned_object_type": "dcim.interface",
+                        "assigned_object_type": self.assigned_object_type,
                         "assigned_object_id": nic.id,
                     }
                 )
