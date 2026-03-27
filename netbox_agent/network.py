@@ -301,11 +301,7 @@ class Network(object):
 
     def update_interface_macs(self, nic, macs):
         # MAC addresses are always under the DCIM API, even for VM interfaces
-        # But the filter parameter differs: interface_id for DCIM, vminterface_id for VMs
-        if self.assigned_object_type == "virtualization.vminterface":
-            nb_macs = list(nb.dcim.mac_addresses.filter(vminterface_id=nic.id))
-        else:
-            nb_macs = list(nb.dcim.mac_addresses.filter(interface_id=nic.id))
+        nb_macs = list(nb.dcim.mac_addresses.filter(**{self.intf_type: nic.id}))
         # Clean
         for nb_mac in nb_macs:
             if nb_mac.mac_address not in macs:
