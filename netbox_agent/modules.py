@@ -200,6 +200,9 @@ class ModuleManager:
         amd_rocm = self._get_amd_rocm_version()
         amd_serials = self._get_amd_gpu_serials() if amd_driver else {}
         amd_gpu_idx = 0  # Counter for AMD GPUs (separate from NVIDIA index)
+        gaudi_driver, gaudi_devices = self._get_intel_gaudi_info()
+        gaudi_serials = {d.get("businfo", ""): d.get("serial") for d in gaudi_devices if d.get("serial")}
+        gaudi_names = {d.get("businfo", ""): d.get("product") for d in gaudi_devices if d.get("product")}
 
         items = []
         real_idx = 0  # index into nvidia-smi GPU info (only real GPUs)
@@ -242,11 +245,21 @@ class ModuleManager:
                 driver = amd_driver
                 serial = amd_serials.get(amd_gpu_idx)
                 amd_gpu_idx += 1
+            elif "habana" in vendor_lower or "gaudi" in product.lower():
+                # Intel Gaudi — enriched from hl-smi
+                driver = gaudi_driver
+                # Match by PCI bus address for serial and product name
+                bus_addr = businfo.split("@")[-1] if "@" in businfo else businfo
+                serial = gaudi_serials.get(bus_addr)
+                hl_name = gaudi_names.get(bus_addr)
+                if hl_name:
+                    product = hl_name
+                vendor = "Habana Labs (Intel)"
             else:
                 # Generic: read driver from sysfs for this PCI device
                 driver = self._get_driver_for_pci_device(businfo)
 
-            # Build description: driver + compute runtime (CUDA/ROCm)
+            # Build description: driver + compute runtime (CUDA/ROCm/Habana)
             desc_parts = []
             if driver:
                 desc_parts.append(f"driver: {driver}")
@@ -254,6 +267,8 @@ class ModuleManager:
                 desc_parts.append(f"CUDA: {nvidia_cuda}")
             elif ("amd" in vendor_lower or "ati" in vendor_lower) and amd_rocm:
                 desc_parts.append(f"ROCm: {amd_rocm}")
+            elif "habana" in vendor_lower and gaudi_driver:
+                desc_parts.append(f"SynapseAI: habanalabs {gaudi_driver}")
             full_desc = " | ".join(p for p in desc_parts if p)
 
             items.append({
@@ -298,32 +313,10 @@ class ModuleManager:
                 "businfo": businfo,
             })
 
-        # Source 2: Intel Gaudi (Habana Labs) — may not appear in lshw as
-        # "coprocessor" on all systems. Use hl-smi if available for enrichment.
-        gaudi_driver, gaudi_devices = self._get_intel_gaudi_info()
-        if gaudi_devices:
-            # Merge with lshw data or add if not already found
-            lshw_buses = {a.get("businfo", "") for a in items}
-            for gdev in gaudi_devices:
-                bus = gdev.get("businfo", "")
-                if bus and any(bus in b for b in lshw_buses):
-                    # Already found via lshw — enrich with serial
-                    for item in items:
-                        if bus in item.get("businfo", ""):
-                            item["serial"] = gdev.get("serial")
-                            if gdev.get("product"):
-                                item["product"] = gdev["product"]
-                            if gaudi_driver:
-                                item["description"] = f"driver: habanalabs {gaudi_driver}"
-                else:
-                    # Not in lshw — add from hl-smi
-                    items.append({
-                        "product": gdev.get("product", "Gaudi Accelerator"),
-                        "vendor": "Habana Labs (Intel)",
-                        "serial": gdev.get("serial"),
-                        "description": f"driver: habanalabs {gaudi_driver}" if gaudi_driver else "",
-                        "businfo": bus,
-                    })
+        # Note: Intel Gaudi (Habana Labs) is now routed to GPUs via lshw.py,
+        # not to accelerators. Gaudi enrichment (hl-smi serials, driver) happens
+        # in _get_local_gpus(). This method only handles non-GPU accelerators
+        # (Pliops, FPGAs, QAT, custom hardware).
 
         if items:
             logger.info("Detected %d accelerator(s): %s",

@@ -175,6 +175,10 @@ class LSHW:
                 }
             )
 
+    # Vendors whose "coprocessor" class PCI devices are actually GPUs,
+    # not custom accelerators. These get routed to self.gpus, not self.accelerators.
+    _GPU_VENDORS = {"habana", "intel", "amd", "nvidia"}
+
     def find_gpus(self, obj):
         if "product" in obj:
             infos = {
@@ -199,10 +203,13 @@ class LSHW:
     }
 
     def find_accelerators(self, obj):
-        """Capture non-GPU compute accelerators (Gaudi, FPGA, DPU, QAT, etc.).
+        """Route PCI devices under coprocessor/generic/processing classes.
 
-        Filters out chipset infrastructure (IOMMU, system peripherals) that
-        lshw classifies under "generic" but are not real accelerators.
+        Known GPU vendors (Habana/Intel Gaudi, AMD, NVIDIA) get routed to
+        self.gpus — they are general-purpose GPUs regardless of PCI class.
+
+        Everything else goes to self.accelerators (Pliops, FPGAs, QAT, etc.).
+        Chipset infrastructure (IOMMU, system peripherals) is filtered out.
         """
         if "product" not in obj:
             return
@@ -210,9 +217,19 @@ class LSHW:
         # Skip chipset infrastructure
         if any(infra in description for infra in self._INFRA_DESCRIPTIONS):
             return
+
+        vendor = obj.get("vendor", "Unknown")
+        vendor_lower = vendor.lower()
+
+        # Known GPU vendors under non-display PCI classes → route to GPUs
+        if any(gv in vendor_lower for gv in self._GPU_VENDORS):
+            self.find_gpus(obj)
+            return
+
+        # Everything else is a true accelerator (Pliops, FPGA, custom hardware)
         self.accelerators.append({
             "product": obj.get("product", "Unknown Accelerator"),
-            "vendor": obj.get("vendor", "Unknown"),
+            "vendor": vendor,
             "description": obj.get("description", ""),
             "businfo": obj.get("businfo", ""),
             "class": obj.get("class", ""),
