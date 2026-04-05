@@ -235,10 +235,12 @@ class ModuleManager:
                 nv_info = nvidia_gpu_info.get(real_idx, {})
                 serial = nv_info.get("serial")
                 driver = nvidia_driver
-                # lshw often returns "NVIDIA Corporation" as product when the
-                # PCI ID isn't in its database. nvidia-smi has the real name.
+                # Always prefer nvidia-smi product name over lshw. lshw may
+                # return vendor name ("NVIDIA Corporation"), chip codename
+                # ("GA103", "AD102GL"), or truncated names when its PCI ID
+                # database is outdated. nvidia-smi is authoritative.
                 nv_name = nv_info.get("name", "")
-                if nv_name and (product == vendor or "Corporation" in product):
+                if nv_name:
                     product = nv_name
                 real_idx += 1
             elif "amd" in vendor_lower or "ati" in vendor_lower:
