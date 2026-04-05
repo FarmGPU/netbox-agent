@@ -203,24 +203,27 @@ class ModuleManager:
         for gpu in gpus:
             product = gpu.get("product", "Unknown GPU")
             vendor = gpu.get("vendor", "Unknown")
+            vendor_lower = vendor.lower()
             description = gpu.get("description", "")
             businfo = gpu.get("businfo", "")
 
             # Skip BMC/onboard VGA controllers
-            if vendor.lower() in self._SKIP_GPU_VENDORS:
+            if vendor_lower in self._SKIP_GPU_VENDORS:
                 logger.debug("Skipping onboard VGA: %s %s", vendor, product)
                 continue
             if any(kw in product.lower() for kw in self._SKIP_GPU_KEYWORDS):
                 logger.debug("Skipping onboard VGA: %s", product)
                 continue
-            if "VGA compatible" in description and "3D" not in description:
+            # Skip onboard VGA — but NOT discrete NVIDIA/AMD GPUs which may also
+            # report as "VGA compatible" when lshw doesn't have the PCI ID mapping.
+            is_known_gpu_vendor = any(v in vendor_lower for v in ("nvidia", "amd", "ati"))
+            if "VGA compatible" in description and "3D" not in description and not is_known_gpu_vendor:
                 logger.debug("Skipping VGA-only device: %s %s", vendor, product)
                 continue
 
             # Resolve serial, product name, and driver per vendor
             serial = None
             driver = ""
-            vendor_lower = vendor.lower()
 
             if "nvidia" in vendor_lower:
                 nv_info = nvidia_gpu_info.get(real_idx, {})
