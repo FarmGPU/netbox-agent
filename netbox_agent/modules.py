@@ -802,10 +802,17 @@ class ModuleManager:
 
         return items
 
+    # Vendors whose NIC ports are internal to GPU/accelerator cards and
+    # should NOT be created as separate NIC modules. These are scale-up
+    # interconnect ports (like NVLink for NVIDIA), not standalone NICs.
+    # The tell: vendor == product (lshw has no real product name for them).
+    _GPU_INTERNAL_NIC_VENDORS = {"habana labs"}
+
     def _get_local_nics(self):
         """
         Detect physical NICs via lshw, grouped by card (using product+vendor).
-        Uses MAC address as a serial proxy.
+        Uses MAC address as a serial proxy. Filters out GPU-internal
+        interconnect ports (e.g. Habana Labs Gaudi scale-up NICs).
         """
         items = []
         seen_macs = set()
@@ -813,13 +820,27 @@ class ModuleManager:
         for iface in self.lshw.interfaces:
             mac = iface.get("serial", iface.get("macaddress", ""))
             product = iface.get("product", "Unknown NIC")
+            vendor = iface.get("vendor", "Unknown")
+
             if not mac or mac in seen_macs:
                 continue
-            seen_macs.add(mac)
 
+            # Skip GPU-internal interconnect ports. These are identified by:
+            # - Vendor matches a known GPU internal NIC vendor
+            # - Product name equals vendor name (lshw has no real product)
+            vendor_lower = vendor.lower()
+            if any(gv in vendor_lower for gv in self._GPU_INTERNAL_NIC_VENDORS):
+                if product.lower().strip() == vendor_lower.strip() or product == vendor:
+                    logger.debug(
+                        "Skipping GPU internal NIC: %s %s (%s)",
+                        vendor, product, iface.get("name", ""),
+                    )
+                    continue
+
+            seen_macs.add(mac)
             items.append({
                 "product": product,
-                "vendor": iface.get("vendor", "Unknown"),
+                "vendor": vendor,
                 "serial": mac,  # MAC as serial proxy
                 "description": iface.get("description", ""),
                 "name": iface.get("name", ""),
