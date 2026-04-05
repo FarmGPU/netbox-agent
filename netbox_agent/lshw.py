@@ -14,6 +14,7 @@ class LSHW:
         self.power = []
         self.disks = []
         self.gpus = []
+        self.accelerators = []  # Non-GPU compute accelerators (Gaudi, FPGA, DPU, etc.)
         self.vendor = "Unknown"
         self.product = "Unknown"
         self.chassis_serial = "Unknown"
@@ -67,6 +68,8 @@ class LSHW:
             return self.cpus
         if hwclass == "gpu":
             return self.gpus
+        if hwclass == "accelerator":
+            return self.accelerators
         if hwclass == "network":
             return self.interfaces
         if hwclass == "storage":
@@ -178,8 +181,23 @@ class LSHW:
                 "product": obj.get("product", "Unknown GPU"),
                 "vendor": obj.get("vendor", "Unknown"),
                 "description": obj.get("description", ""),
+                "businfo": obj.get("businfo", ""),  # PCI bus ID for driver lookup
             }
             self.gpus.append(infos)
+
+    def find_accelerators(self, obj):
+        """Capture non-GPU compute accelerators (Gaudi, FPGA, DPU, QAT, etc.)."""
+        if "product" in obj:
+            self.accelerators.append({
+                "product": obj.get("product", "Unknown Accelerator"),
+                "vendor": obj.get("vendor", "Unknown"),
+                "description": obj.get("description", ""),
+                "businfo": obj.get("businfo", ""),
+                "class": obj.get("class", ""),
+            })
+
+    # PCI device classes that indicate compute accelerators (not CPUs, not GPUs)
+    _ACCELERATOR_CLASSES = {"coprocessor", "generic", "processing"}
 
     def walk_bridge(self, obj):
         """Recursively walk PCI bridge tree to find all devices."""
@@ -194,6 +212,8 @@ class LSHW:
                 self.find_network(child)
             elif cls == "display":
                 self.find_gpus(child)
+            elif cls in self._ACCELERATOR_CLASSES:
+                self.find_accelerators(child)
             elif cls == "bridge":
                 self.walk_bridge(child)
 
@@ -209,6 +229,8 @@ class LSHW:
                         self.find_network(grandchild)
                     elif gc_cls == "display":
                         self.find_gpus(grandchild)
+                    elif gc_cls in self._ACCELERATOR_CLASSES:
+                        self.find_accelerators(grandchild)
                     elif gc_cls == "bridge":
                         self.walk_bridge(grandchild)
 

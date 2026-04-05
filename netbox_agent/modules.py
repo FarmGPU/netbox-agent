@@ -23,6 +23,7 @@ logger = logging.getLogger("netbox_agent.modules")
 CATEGORIES = {
     "cpu": {"prefix": "CPU", "profile": "CPU"},
     "gpu": {"prefix": "GPU", "profile": "GPU"},
+    "accelerator": {"prefix": "ACC", "profile": "Other"},
     "dimm": {"prefix": "DIMM", "profile": "Memory"},
     "ssd": {"prefix": "SSD", "profile": "Hard disk"},
     "nic": {"prefix": "NIC", "profile": "NIC"},
@@ -186,15 +187,24 @@ class ModuleManager:
     _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
 
     def _get_local_gpus(self):
-        """Detect GPUs via lshw + nvidia-smi for serials. Filters out BMC VGA controllers."""
+        """Detect GPUs via lshw + vendor tools for serials and driver info.
+
+        Supports NVIDIA (nvidia-smi), AMD (amdgpu sysfs), and Intel (i915 sysfs).
+        Filters out BMC VGA controllers. Includes driver version in description.
+        """
         gpus = self.lshw.get_hw_linux("gpu")
-        serials = self._get_nvidia_serials()
+
+        # Detect vendor-specific driver info
+        nvidia_driver, nvidia_serials = self._get_nvidia_gpu_info()
+        amd_driver = self._get_amd_gpu_driver()
+
         items = []
         real_idx = 0  # index into nvidia-smi serials (only real GPUs)
         for gpu in gpus:
             product = gpu.get("product", "Unknown GPU")
             vendor = gpu.get("vendor", "Unknown")
             description = gpu.get("description", "")
+            businfo = gpu.get("businfo", "")
 
             # Skip BMC/onboard VGA controllers
             if vendor.lower() in self._SKIP_GPU_VENDORS:
@@ -203,7 +213,6 @@ class ModuleManager:
             if any(kw in product.lower() for kw in self._SKIP_GPU_KEYWORDS):
                 logger.debug("Skipping onboard VGA: %s", product)
                 continue
-            # Skip if description says "VGA compatible" and not "3D" (onboard vs discrete)
             if "VGA compatible" in description and "3D" not in description:
                 logger.debug("Skipping VGA-only device: %s %s", vendor, product)
                 continue
@@ -211,37 +220,234 @@ class ModuleManager:
             # Truncate long product names
             if len(product) > 50:
                 product = product[:48] + ".."
-            serial = serials.get(real_idx)
+
+            # Resolve serial and driver per vendor
+            serial = None
+            driver = ""
+            vendor_lower = vendor.lower()
+
+            if "nvidia" in vendor_lower:
+                serial = nvidia_serials.get(real_idx)
+                driver = nvidia_driver
+                real_idx += 1
+            elif "amd" in vendor_lower or "ati" in vendor_lower:
+                driver = amd_driver
+            else:
+                # Generic: read driver from sysfs for this PCI device
+                driver = self._get_driver_for_pci_device(businfo)
+
+            # Build description with driver version
+            desc_parts = [description] if description else []
+            if driver:
+                desc_parts.append(f"driver: {driver}")
+            full_desc = " | ".join(p for p in desc_parts if p)
+
             items.append({
                 "product": product,
                 "vendor": vendor,
                 "serial": serial,
-                "description": description,
+                "description": full_desc,
             })
-            real_idx += 1
         return items
 
-    def _get_nvidia_serials(self):
-        """Query nvidia-smi for GPU serial numbers. Returns {index: serial}."""
+    def _get_local_accelerators(self):
+        """Detect non-GPU compute accelerators (Gaudi, FPGA, DPU, etc.).
+
+        Uses lshw for PCI device discovery, then enriches with vendor-specific
+        tools (hl-smi for Gaudi) when available. Non-destructive — never
+        installs drivers, only reads what's present.
+
+        Returns list of dicts compatible with the Modules API.
+        """
+        items = []
+
+        # Source 1: lshw accelerator class devices (coprocessor, generic, processing)
+        lshw_accs = self.lshw.get_hw_linux("accelerator")
+        for acc in lshw_accs:
+            product = acc.get("product", "Unknown Accelerator")
+            vendor = acc.get("vendor", "Unknown")
+            businfo = acc.get("businfo", "")
+            description = acc.get("description", "")
+
+            # Get driver info from sysfs
+            driver = self._get_driver_for_pci_device(businfo)
+
+            desc_parts = [description] if description else []
+            if driver:
+                desc_parts.append(f"driver: {driver}")
+
+            items.append({
+                "product": product,
+                "vendor": vendor,
+                "serial": None,
+                "description": " | ".join(p for p in desc_parts if p),
+                "businfo": businfo,
+            })
+
+        # Source 2: Intel Gaudi (Habana Labs) — may not appear in lshw as
+        # "coprocessor" on all systems. Use hl-smi if available for enrichment.
+        gaudi_driver, gaudi_devices = self._get_intel_gaudi_info()
+        if gaudi_devices:
+            # Merge with lshw data or add if not already found
+            lshw_buses = {a.get("businfo", "") for a in items}
+            for gdev in gaudi_devices:
+                bus = gdev.get("businfo", "")
+                if bus and any(bus in b for b in lshw_buses):
+                    # Already found via lshw — enrich with serial
+                    for item in items:
+                        if bus in item.get("businfo", ""):
+                            item["serial"] = gdev.get("serial")
+                            if gdev.get("product"):
+                                item["product"] = gdev["product"]
+                            if gaudi_driver:
+                                item["description"] = f"driver: habanalabs {gaudi_driver}"
+                else:
+                    # Not in lshw — add from hl-smi
+                    items.append({
+                        "product": gdev.get("product", "Gaudi Accelerator"),
+                        "vendor": "Habana Labs (Intel)",
+                        "serial": gdev.get("serial"),
+                        "description": f"driver: habanalabs {gaudi_driver}" if gaudi_driver else "",
+                        "businfo": bus,
+                    })
+
+        if items:
+            logger.info("Detected %d accelerator(s): %s",
+                        len(items),
+                        ", ".join(f'{a["vendor"]} {a["product"]}' for a in items))
+
+        return items
+
+    def _get_nvidia_gpu_info(self):
+        """Query nvidia-smi for GPU serial numbers and driver version.
+
+        Returns:
+            (driver_version, {index: serial})
+        """
+        driver = ""
         serials = {}
         if not is_tool("nvidia-smi"):
-            return serials
+            return driver, serials
         try:
             output = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=index,serial", "--format=csv,noheader,nounits"],
+                ["nvidia-smi", "--query-gpu=index,serial,driver_version",
+                 "--format=csv,noheader,nounits"],
                 encoding="utf-8",
                 timeout=30,
             ).strip()
             for line in output.splitlines():
-                parts = line.split(",")
-                if len(parts) == 2:
-                    idx = int(parts[0].strip())
-                    sn = parts[1].strip()
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3:
+                    idx = int(parts[0])
+                    sn = parts[1]
+                    drv = parts[2]
                     if sn and sn not in ("[N/A]", "N/A", "0", ""):
                         serials[idx] = sn
+                    if drv and drv not in ("[N/A]", "N/A", ""):
+                        driver = drv  # Same across all GPUs
         except Exception as e:
-            logger.warning("nvidia-smi serial query failed: %s", e)
-        return serials
+            logger.warning("nvidia-smi query failed: %s", e)
+        return driver, serials
+
+    def _get_amd_gpu_driver(self):
+        """Get AMD GPU driver version from sysfs or modinfo."""
+        # Try sysfs first (most reliable)
+        try:
+            with open("/sys/module/amdgpu/version") as f:
+                return f.read().strip()
+        except (FileNotFoundError, PermissionError):
+            pass
+        # Fallback to modinfo
+        try:
+            output = subprocess.check_output(
+                ["modinfo", "amdgpu", "-F", "version"],
+                encoding="utf-8", timeout=10,
+            ).strip()
+            if output:
+                return output.splitlines()[0]
+        except Exception:
+            pass
+        return ""
+
+    def _get_driver_for_pci_device(self, businfo: str) -> str:
+        """Get the kernel driver bound to a PCI device.
+
+        Args:
+            businfo: lshw businfo field, e.g., "pci@0000:41:00.0"
+
+        Returns:
+            Driver name and version string, e.g., "amdgpu 6.7.0" or "habanalabs 1.17.0"
+        """
+        if not businfo:
+            return ""
+        # Extract PCI address from "pci@0000:41:00.0" format
+        pci_addr = businfo.split("@")[-1] if "@" in businfo else businfo
+        # Check sysfs for the driver
+        driver_link = f"/sys/bus/pci/devices/{pci_addr}/driver"
+        try:
+            import os
+            driver_path = os.readlink(driver_link)
+            driver_name = os.path.basename(driver_path)
+            # Get driver version from modinfo
+            try:
+                version = subprocess.check_output(
+                    ["modinfo", driver_name, "-F", "version"],
+                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                ).strip().splitlines()[0]
+                return f"{driver_name} {version}"
+            except Exception:
+                return driver_name
+        except (FileNotFoundError, OSError):
+            return ""
+
+    def _get_intel_gaudi_info(self):
+        """Detect Intel Gaudi (Habana Labs) accelerators and their driver.
+
+        Uses hl-smi if available, otherwise falls back to sysfs/modinfo
+        for the habanalabs kernel module.
+
+        Returns:
+            (driver_version, [{serial, product, ...}])
+        """
+        driver = ""
+        devices = []
+
+        # Check for habanalabs kernel module
+        try:
+            with open("/sys/module/habanalabs/version") as f:
+                driver = f.read().strip()
+        except (FileNotFoundError, PermissionError):
+            # Try modinfo
+            try:
+                output = subprocess.check_output(
+                    ["modinfo", "habanalabs", "-F", "version"],
+                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                ).strip()
+                if output:
+                    driver = output.splitlines()[0]
+            except Exception:
+                pass
+
+        # Use hl-smi for device details if available
+        if is_tool("hl-smi"):
+            try:
+                output = subprocess.check_output(
+                    ["hl-smi", "-Q", "index,name,serial,bus_id", "-f", "csv,noheader"],
+                    encoding="utf-8", timeout=30,
+                ).strip()
+                for line in output.splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 4:
+                        devices.append({
+                            "index": int(parts[0]),
+                            "product": parts[1],
+                            "serial": parts[2] if parts[2] not in ("N/A", "") else None,
+                            "businfo": parts[3],
+                        })
+            except Exception as e:
+                logger.debug("hl-smi query failed: %s", e)
+
+        return driver, devices
 
     def _get_local_dimms(self):
         """Detect DIMMs via lshw memory children."""
@@ -972,6 +1178,7 @@ class ModuleManager:
         detections = {
             "cpu": self._get_local_cpus(),
             "gpu": self._get_local_gpus(),
+            "accelerator": self._get_local_accelerators(),
             "dimm": self._get_local_dimms(),
             "ssd": self._get_local_ssds(),
             "nic": self._get_local_nics(),
