@@ -194,10 +194,12 @@ class ModuleManager:
         """
         gpus = self.lshw.get_hw_linux("gpu")
 
-        # Detect vendor-specific driver and runtime info
+        # Detect vendor-specific driver, runtime, and serial info
         nvidia_driver, nvidia_cuda, nvidia_gpu_info = self._get_nvidia_gpu_info()
         amd_driver = self._get_amd_gpu_driver()
         amd_rocm = self._get_amd_rocm_version()
+        amd_serials = self._get_amd_gpu_serials() if amd_driver else {}
+        amd_gpu_idx = 0  # Counter for AMD GPUs (separate from NVIDIA index)
 
         items = []
         real_idx = 0  # index into nvidia-smi GPU info (only real GPUs)
@@ -238,6 +240,8 @@ class ModuleManager:
                 real_idx += 1
             elif "amd" in vendor_lower or "ati" in vendor_lower:
                 driver = amd_driver
+                serial = amd_serials.get(amd_gpu_idx)
+                amd_gpu_idx += 1
             else:
                 # Generic: read driver from sysfs for this PCI device
                 driver = self._get_driver_for_pci_device(businfo)
@@ -421,13 +425,66 @@ class ModuleManager:
         try:
             output = subprocess.check_output(
                 ["modinfo", "amdgpu", "-F", "version"],
-                encoding="utf-8", timeout=10,
+                encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
             ).strip()
             if output:
                 return output.splitlines()[0]
         except Exception:
             pass
         return ""
+
+    def _get_amd_gpu_serials(self):
+        """Get AMD GPU serial numbers from rocm-smi or sysfs.
+
+        AMD Instinct (MI200, MI300) and some consumer GPUs expose serials.
+        Returns {gpu_index: serial}.
+        """
+        serials = {}
+
+        # Method 1: rocm-smi --showserial
+        if is_tool("rocm-smi"):
+            try:
+                import re
+                output = subprocess.check_output(
+                    ["rocm-smi", "--showserial"],
+                    encoding="utf-8", timeout=15, stderr=subprocess.DEVNULL,
+                ).strip()
+                # Parse "GPU[0] : Serial Number: XXXX" format
+                for m in re.finditer(r"GPU\[(\d+)\]\s*:\s*Serial Number:\s*(\S+)", output):
+                    idx = int(m.group(1))
+                    sn = m.group(2)
+                    if sn and sn not in ("N/A", "0", ""):
+                        serials[idx] = sn
+                return serials
+            except Exception as e:
+                logger.debug("rocm-smi serial query failed: %s", e)
+
+        # Method 2: sysfs serial_number (kernel 5.15+)
+        try:
+            import os
+            import glob
+            for card_dir in sorted(glob.glob("/sys/class/drm/card[0-9]*/device/")):
+                serial_path = os.path.join(card_dir, "serial_number")
+                vendor_path = os.path.join(card_dir, "vendor")
+                try:
+                    with open(vendor_path) as f:
+                        vendor_id = f.read().strip()
+                    # AMD vendor ID = 0x1002
+                    if vendor_id != "0x1002":
+                        continue
+                    with open(serial_path) as f:
+                        sn = f.read().strip()
+                    if sn and sn not in ("0", "0x0000000000000000"):
+                        # Extract card index from path
+                        card_name = card_dir.split("/")[-3]  # "card0"
+                        idx = int(card_name.replace("card", ""))
+                        serials[idx] = sn
+                except (FileNotFoundError, ValueError):
+                    continue
+        except Exception as e:
+            logger.debug("sysfs AMD serial lookup failed: %s", e)
+
+        return serials
 
     def _get_driver_for_pci_device(self, businfo: str) -> str:
         """Get the kernel driver bound to a PCI device.
