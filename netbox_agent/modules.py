@@ -194,9 +194,10 @@ class ModuleManager:
         """
         gpus = self.lshw.get_hw_linux("gpu")
 
-        # Detect vendor-specific driver info
-        nvidia_driver, nvidia_gpu_info = self._get_nvidia_gpu_info()
+        # Detect vendor-specific driver and runtime info
+        nvidia_driver, nvidia_cuda, nvidia_gpu_info = self._get_nvidia_gpu_info()
         amd_driver = self._get_amd_gpu_driver()
+        amd_rocm = self._get_amd_rocm_version()
 
         items = []
         real_idx = 0  # index into nvidia-smi GPU info (only real GPUs)
@@ -241,10 +242,14 @@ class ModuleManager:
                 # Generic: read driver from sysfs for this PCI device
                 driver = self._get_driver_for_pci_device(businfo)
 
-            # Build description with driver version
-            desc_parts = [description] if description else []
+            # Build description: driver + compute runtime (CUDA/ROCm)
+            desc_parts = []
             if driver:
                 desc_parts.append(f"driver: {driver}")
+            if "nvidia" in vendor_lower and nvidia_cuda:
+                desc_parts.append(f"CUDA: {nvidia_cuda}")
+            elif ("amd" in vendor_lower or "ati" in vendor_lower) and amd_rocm:
+                desc_parts.append(f"ROCm: {amd_rocm}")
             full_desc = " | ".join(p for p in desc_parts if p)
 
             items.append({
@@ -324,15 +329,16 @@ class ModuleManager:
         return items
 
     def _get_nvidia_gpu_info(self):
-        """Query nvidia-smi for GPU names, serial numbers, and driver version.
+        """Query nvidia-smi for GPU names, serial numbers, driver, and CUDA version.
 
         Returns:
-            (driver_version, {index: {"serial": str, "name": str}})
+            (driver_version, cuda_version, {index: {"serial": str, "name": str}})
         """
         driver = ""
+        cuda = ""
         gpu_info = {}
         if not is_tool("nvidia-smi"):
-            return driver, gpu_info
+            return driver, cuda, gpu_info
         try:
             output = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=index,name,serial,driver_version",
@@ -352,10 +358,56 @@ class ModuleManager:
                         info["serial"] = sn
                     gpu_info[idx] = info
                     if drv and drv not in ("[N/A]", "N/A", ""):
-                        driver = drv  # Same across all GPUs
+                        driver = drv
         except Exception as e:
             logger.warning("nvidia-smi query failed: %s", e)
-        return driver, gpu_info
+
+        # CUDA version from nvidia-smi header (not available via --query-gpu)
+        try:
+            import re
+            header = subprocess.check_output(
+                ["nvidia-smi"], encoding="utf-8", timeout=10,
+            )
+            m = re.search(r"CUDA Version:\s*([0-9.]+)", header)
+            if m:
+                cuda = m.group(1)
+        except Exception:
+            pass
+
+        return driver, cuda, gpu_info
+
+    def _get_amd_rocm_version(self):
+        """Get AMD ROCm version if installed. Analogous to CUDA for NVIDIA."""
+        # Try rocm-smi
+        if is_tool("rocm-smi"):
+            try:
+                output = subprocess.check_output(
+                    ["rocm-smi", "--showdriverversion"],
+                    encoding="utf-8", timeout=10,
+                ).strip()
+                for line in output.splitlines():
+                    if "Driver version" in line:
+                        return line.split(":")[-1].strip()
+            except Exception:
+                pass
+        # Try rocminfo
+        if is_tool("rocminfo"):
+            try:
+                output = subprocess.check_output(
+                    ["rocminfo"], encoding="utf-8", timeout=10,
+                ).strip()
+                for line in output.splitlines():
+                    if "Runtime Version" in line:
+                        return line.split(":")[-1].strip()
+            except Exception:
+                pass
+        # Try /opt/rocm/.info/version
+        try:
+            with open("/opt/rocm/.info/version") as f:
+                return f.read().strip()
+        except (FileNotFoundError, PermissionError):
+            pass
+        return ""
 
     def _get_amd_gpu_driver(self):
         """Get AMD GPU driver version from sysfs or modinfo."""
