@@ -195,11 +195,11 @@ class ModuleManager:
         gpus = self.lshw.get_hw_linux("gpu")
 
         # Detect vendor-specific driver info
-        nvidia_driver, nvidia_serials = self._get_nvidia_gpu_info()
+        nvidia_driver, nvidia_gpu_info = self._get_nvidia_gpu_info()
         amd_driver = self._get_amd_gpu_driver()
 
         items = []
-        real_idx = 0  # index into nvidia-smi serials (only real GPUs)
+        real_idx = 0  # index into nvidia-smi GPU info (only real GPUs)
         for gpu in gpus:
             product = gpu.get("product", "Unknown GPU")
             vendor = gpu.get("vendor", "Unknown")
@@ -217,18 +217,20 @@ class ModuleManager:
                 logger.debug("Skipping VGA-only device: %s %s", vendor, product)
                 continue
 
-            # Truncate long product names
-            if len(product) > 50:
-                product = product[:48] + ".."
-
-            # Resolve serial and driver per vendor
+            # Resolve serial, product name, and driver per vendor
             serial = None
             driver = ""
             vendor_lower = vendor.lower()
 
             if "nvidia" in vendor_lower:
-                serial = nvidia_serials.get(real_idx)
+                nv_info = nvidia_gpu_info.get(real_idx, {})
+                serial = nv_info.get("serial")
                 driver = nvidia_driver
+                # lshw often returns "NVIDIA Corporation" as product when the
+                # PCI ID isn't in its database. nvidia-smi has the real name.
+                nv_name = nv_info.get("name", "")
+                if nv_name and (product == vendor or "Corporation" in product):
+                    product = nv_name
                 real_idx += 1
             elif "amd" in vendor_lower or "ati" in vendor_lower:
                 driver = amd_driver
@@ -319,35 +321,38 @@ class ModuleManager:
         return items
 
     def _get_nvidia_gpu_info(self):
-        """Query nvidia-smi for GPU serial numbers and driver version.
+        """Query nvidia-smi for GPU names, serial numbers, and driver version.
 
         Returns:
-            (driver_version, {index: serial})
+            (driver_version, {index: {"serial": str, "name": str}})
         """
         driver = ""
-        serials = {}
+        gpu_info = {}
         if not is_tool("nvidia-smi"):
-            return driver, serials
+            return driver, gpu_info
         try:
             output = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=index,serial,driver_version",
+                ["nvidia-smi", "--query-gpu=index,name,serial,driver_version",
                  "--format=csv,noheader,nounits"],
                 encoding="utf-8",
                 timeout=30,
             ).strip()
             for line in output.splitlines():
                 parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3:
+                if len(parts) >= 4:
                     idx = int(parts[0])
-                    sn = parts[1]
-                    drv = parts[2]
+                    name = parts[1]
+                    sn = parts[2]
+                    drv = parts[3]
+                    info = {"name": name, "serial": None}
                     if sn and sn not in ("[N/A]", "N/A", "0", ""):
-                        serials[idx] = sn
+                        info["serial"] = sn
+                    gpu_info[idx] = info
                     if drv and drv not in ("[N/A]", "N/A", ""):
                         driver = drv  # Same across all GPUs
         except Exception as e:
             logger.warning("nvidia-smi query failed: %s", e)
-        return driver, serials
+        return driver, gpu_info
 
     def _get_amd_gpu_driver(self):
         """Get AMD GPU driver version from sysfs or modinfo."""

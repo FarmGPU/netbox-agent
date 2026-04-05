@@ -185,16 +185,36 @@ class LSHW:
             }
             self.gpus.append(infos)
 
+    # Descriptions that indicate chipset infrastructure, NOT real accelerators.
+    # These are IOMMU, host bridges, system peripherals, etc. that lshw
+    # classifies as "generic" but are not compute accelerators.
+    _INFRA_DESCRIPTIONS = {
+        "iommu", "system peripheral", "generic system peripheral",
+        "non-essential instrumentation", "encryption controller",
+        "host bridge", "pci bridge", "isa bridge", "smi bridge",
+        "signal processing controller", "communication controller",
+        "pic", "dma controller", "timer",
+    }
+
     def find_accelerators(self, obj):
-        """Capture non-GPU compute accelerators (Gaudi, FPGA, DPU, QAT, etc.)."""
-        if "product" in obj:
-            self.accelerators.append({
-                "product": obj.get("product", "Unknown Accelerator"),
-                "vendor": obj.get("vendor", "Unknown"),
-                "description": obj.get("description", ""),
-                "businfo": obj.get("businfo", ""),
-                "class": obj.get("class", ""),
-            })
+        """Capture non-GPU compute accelerators (Gaudi, FPGA, DPU, QAT, etc.).
+
+        Filters out chipset infrastructure (IOMMU, system peripherals) that
+        lshw classifies under "generic" but are not real accelerators.
+        """
+        if "product" not in obj:
+            return
+        description = obj.get("description", "").lower()
+        # Skip chipset infrastructure
+        if any(infra in description for infra in self._INFRA_DESCRIPTIONS):
+            return
+        self.accelerators.append({
+            "product": obj.get("product", "Unknown Accelerator"),
+            "vendor": obj.get("vendor", "Unknown"),
+            "description": obj.get("description", ""),
+            "businfo": obj.get("businfo", ""),
+            "class": obj.get("class", ""),
+        })
 
     # PCI device classes that indicate compute accelerators (not CPUs, not GPUs)
     _ACCELERATOR_CLASSES = {"coprocessor", "generic", "processing"}
