@@ -194,6 +194,8 @@ class LSHW:
         "host bridge", "pci bridge", "isa bridge", "smi bridge",
         "signal processing controller", "communication controller",
         "pic", "dma controller", "timer",
+        "performance counters",     # Intel CPU uncore PMU counters
+        "scsi enclosure",           # Dell storage enclosure managers (Fryer U.2 etc.)
     }
 
     def find_accelerators(self, obj):
