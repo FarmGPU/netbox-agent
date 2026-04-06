@@ -292,20 +292,26 @@ class ServerBase:
                 server.serial = serial
                 server.save()
 
-    def _refine_role(self, server):
-        """Refine generic 'Server' role to GPU/CPU/Storage Server based on hardware.
+    # Roles that are auto-assigned and can be corrected by hardware detection.
+    # Manually-set roles (Firewall, JBOF, etc.) are never touched.
+    _AUTO_ASSIGNABLE_ROLES = {"Server", "GPU Server", "CPU Server", "Storage Server"}
 
-        Only refines when the current role is generic 'Server'.
-        Never downgrades from a more specific role (e.g., won't change
-        'GPU Server' to 'CPU Server' if nvidia-smi fails).
+    def _refine_role(self, server):
+        """Assign or correct server role based on hardware detection.
+
+        Runs on every sync to ensure the role stays accurate as hardware
+        changes (GPUs added/removed, disks added/removed).
+
+        Only modifies roles in _AUTO_ASSIGNABLE_ROLES. Manually-set roles
+        like Firewall, JBOF, PDU, etc. are never touched.
         """
         current_role = server.role
         if not current_role:
             return
 
         role_name = current_role.name if hasattr(current_role, 'name') else str(current_role)
-        if role_name != "Server":
-            return  # Already refined or manually set — don't touch
+        if role_name not in self._AUTO_ASSIGNABLE_ROLES:
+            return  # Manually set role — don't touch
 
         # Detect hardware to determine refined role
         new_role_name = self._detect_server_type()
@@ -328,38 +334,66 @@ class ServerBase:
     _SKIP_GPU_VENDORS = {"aspeed technology, inc.", "matrox electronics systems ltd."}
     _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
 
+    # Minimum discrete GPUs to classify as "GPU Server".
+    # Filters out machines with 1-2 GPUs used for display/monitoring.
+    # Most GPU servers have 3+ (4x RTX 4090, 8x H100, 8x B200, etc.)
+    _MIN_GPU_COUNT = 3
+
+    # Minimum physical disk count to classify as "Storage Server".
+    # Standard servers have 1-4 disks (OS + data). Storage servers
+    # have 8+ (NVMe shelves, JBOF-connected, Ceph/Weka nodes).
+    _MIN_STORAGE_DISK_COUNT = 6
+
     def _detect_server_type(self) -> str:
         """Determine server type from hardware.
 
+        Thresholds:
+          GPU Server:     ≥ 3 discrete GPUs (NVIDIA, AMD, Intel Gaudi)
+          Storage Server: ≥ 6 physical disks
+          CPU Server:     everything else
+
+        GPU detection filters out onboard VGA (Aspeed, Matrox) and
+        known non-GPU vendors. Only counts discrete GPUs from NVIDIA,
+        AMD, or Intel (Gaudi).
+
+        Storage detection counts physical block devices excluding
+        virtual devices (loop, ram, zram, device-mapper).
+
         Returns: 'GPU Server', 'CPU Server', or 'Storage Server'.
         """
-        # Check for GPUs
-        has_gpus = False
+        # --- Check for discrete GPUs ---
+        gpu_count = 0
         try:
             from netbox_agent.lshw import LSHW
             lshw = LSHW()
             gpus = lshw.get_hw_linux("gpu")
-            real_gpus = []
+
+            # Known GPU vendors (discrete GPUs, not onboard VGA)
+            _GPU_VENDORS = {"nvidia", "amd", "ati", "habana", "intel"}
+            _SKIP_VENDORS = {"aspeed", "matrox"}
+
             for gpu in gpus:
                 vendor = gpu.get("vendor", "").lower()
                 product = gpu.get("product", "").lower()
-                description = gpu.get("description", "")
-                if vendor in self._SKIP_GPU_VENDORS:
+
+                # Skip known onboard VGA
+                if any(sv in vendor for sv in _SKIP_VENDORS):
                     continue
-                if any(kw in product for kw in self._SKIP_GPU_KEYWORDS):
+                if any(kw in product for kw in ("aspeed", "matrox")):
                     continue
-                if "VGA compatible" in description and "3D" not in description:
-                    continue
-                real_gpus.append(gpu)
-            has_gpus = len(real_gpus) > 0
+
+                # Only count if vendor is a known GPU maker
+                is_known_gpu = any(gv in vendor for gv in _GPU_VENDORS)
+                if is_known_gpu:
+                    gpu_count += 1
         except Exception as e:
             logging.warning("GPU detection failed during role refinement: %s", e)
 
-        if has_gpus:
+        if gpu_count >= self._MIN_GPU_COUNT:
             return "GPU Server"
 
-        # Check for bulk storage (Storage Server indicator)
-        has_bulk_storage = False
+        # --- Check for bulk storage ---
+        disk_count = 0
         try:
             output = subprocess.check_output(
                 ["lsblk", "-J", "-b", "-d", "-o", "NAME,TYPE,SIZE"],
@@ -368,16 +402,17 @@ class ServerBase:
             data = json.loads(output)
             disks = [d for d in data.get("blockdevices", [])
                      if d.get("type") == "disk"
-                     and not d.get("name", "").startswith(("loop", "ram", "zram"))]
-            # 8+ physical disks suggests storage server
-            has_bulk_storage = len(disks) >= 8
+                     and not d.get("name", "").startswith(
+                         ("loop", "ram", "zram", "dm-", "md")
+                     )]
+            disk_count = len(disks)
         except Exception as e:
             logging.warning("Storage detection failed during role refinement: %s", e)
 
-        if has_bulk_storage:
+        if disk_count >= self._MIN_STORAGE_DISK_COUNT:
             return "Storage Server"
 
-        # Default: CPU Server (no GPUs, no bulk storage)
+        # Default: CPU Server
         return "CPU Server"
 
     # --- Tenant auto-detection from running services ---
