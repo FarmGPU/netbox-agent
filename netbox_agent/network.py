@@ -399,10 +399,11 @@ class Network(object):
                 "name": interface,
                 "mac": mac,
                 "ip": [
-                    "{}/{}".format(x["addr"], IPAddress(x["mask"]).netmask_bits()) for x in ip_addr
+                    "{}/{}".format(x["addr"], IPAddress(x["mask"]).netmask_bits())
+                    for x in ip_addr
+                    if "addr" in x and "mask" in x
                 ]
-                if ip_addr
-                else None,  # FIXME: handle IPv6 addresses
+                or None,  # FIXME: handle IPv6 addresses
                 "ethtool": ethtool,
                 "virtual": virtual,
                 "vlan": vlan,
@@ -605,6 +606,7 @@ class Network(object):
                 "name": nic["name"],
                 "type": nic_type,
                 "mgmt_only": mgmt,
+                "custom_fields": {"managed_by": "netbox-agent"},
             }
         )
         if nic["mac"] and len(nic["mac"]) == 17:
@@ -823,11 +825,20 @@ class Network(object):
         _clear_nic_module_cache()
         logging.debug("Creating/Updating NIC...")
 
-        # delete unknown interface
+        # delete unknown interface — but respect managed_by ownership.
+        # Interfaces created by other workers (bmc-scan, proxmox-sync)
+        # may not be visible to the OS and must not be deleted.
         nb_nics = list(self.get_netbox_network_cards())
         local_nics = [self._nic_identifier(x) for x in self.nics]
         for nic in list(nb_nics):
             if self._nic_identifier(nic) not in local_nics:
+                managed_by = (nic.custom_fields or {}).get("managed_by", "")
+                if managed_by and managed_by != "netbox-agent":
+                    logging.debug(
+                        "Skipping deletion of '%s' (managed_by=%s)",
+                        nic.name, managed_by,
+                    )
+                    continue
                 logging.info(
                     "Deleting netbox interface {name} because not present locally".format(
                         name=nic.name
