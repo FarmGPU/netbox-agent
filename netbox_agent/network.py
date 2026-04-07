@@ -298,16 +298,33 @@ class Network(object):
     def get_network_type():
         return NotImplementedError
 
+    # Proxmox VE creates many virtual bridge/firewall/tap interfaces that
+    # clutter NetBox.  When /etc/pve/ exists (present on every PVE node)
+    # these patterns are automatically appended to the configured
+    # ignore_interfaces regex — no manual config change required.
+    _PROXMOX_IFACE_PATTERNS = r"(fwbr.*|fwln.*|fwpr.*|tap\d+i\d+|vmbr\d+|ovs.*)"
+
+    @staticmethod
+    def _build_ignore_re():
+        """Return the compiled ignore regex, extending it for Proxmox hosts."""
+        base = config.network.ignore_interfaces or ""
+        if os.path.isdir("/etc/pve"):
+            if base:
+                base = f"{base}|{ServerNetwork._PROXMOX_IFACE_PATTERNS}"
+            else:
+                base = ServerNetwork._PROXMOX_IFACE_PATTERNS
+            logging.debug("Proxmox detected — extended ignore pattern: %s", base)
+        return re.compile(base) if base else None
+
     def scan(self):
         nics = []
+        ignore_re = self._build_ignore_re()
         for interface in os.listdir("/sys/class/net/"):
             # ignore if it's not a link (ie: bonding_masters etc)
             if not os.path.islink("/sys/class/net/{}".format(interface)):
                 continue
 
-            if config.network.ignore_interfaces and re.match(
-                config.network.ignore_interfaces, interface
-            ):
+            if ignore_re and ignore_re.match(interface):
                 logging.debug("Ignore interface {interface}".format(interface=interface))
                 continue
 

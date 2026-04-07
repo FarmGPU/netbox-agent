@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import logging
@@ -293,8 +294,33 @@ class ServerBase:
                 server.save()
 
     # Roles that are auto-assigned and can be corrected by hardware detection.
-    # Manually-set roles (Firewall, JBOF, etc.) are never touched.
+    # Manually-set roles (Firewall, JBOF, Hypervisor, etc.) are never touched.
     _AUTO_ASSIGNABLE_ROLES = {"Server", "GPU Server", "CPU Server", "Storage Server"}
+
+    @staticmethod
+    def _is_proxmox_host() -> bool:
+        """Detect if this machine is a Proxmox VE hypervisor node."""
+        return os.path.isdir("/etc/pve")
+
+    @staticmethod
+    def _read_proxmox_cluster_name() -> str | None:
+        """Read the Proxmox cluster name from corosync.conf.
+
+        Returns the cluster_name from the totem section, or None if
+        this is a standalone (non-clustered) Proxmox node.
+        """
+        conf = "/etc/pve/corosync.conf"
+        if not os.path.isfile(conf):
+            return None
+        try:
+            with open(conf) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("cluster_name:"):
+                        return line.split(":", 1)[1].strip()
+        except OSError:
+            logging.warning("Could not read %s", conf)
+        return None
 
     def _refine_role(self, server):
         """Assign or correct server role based on hardware detection.
@@ -303,7 +329,7 @@ class ServerBase:
         changes (GPUs added/removed, disks added/removed).
 
         Only modifies roles in _AUTO_ASSIGNABLE_ROLES. Manually-set roles
-        like Firewall, JBOF, PDU, etc. are never touched.
+        like Firewall, JBOF, Hypervisor, etc. are never touched.
         """
         current_role = server.role
         if not current_role:
@@ -313,16 +339,22 @@ class ServerBase:
         if role_name not in self._AUTO_ASSIGNABLE_ROLES:
             return  # Manually set role — don't touch
 
-        # Detect hardware to determine refined role
-        new_role_name = self._detect_server_type()
+        # Proxmox hosts should be Hypervisors, not Storage/CPU servers
+        if self._is_proxmox_host():
+            new_role_name = "Hypervisor"
+        else:
+            # Detect hardware to determine refined role
+            new_role_name = self._detect_server_type()
+
         if new_role_name and new_role_name != "Server":
             role = nb.dcim.device_roles.get(name=new_role_name)
             if role:
+                old_role = role_name
                 server.role = role.id
                 server.save()
                 logging.info(
-                    "Refined role for '%s': Server → %s",
-                    server.name, new_role_name,
+                    "Refined role for '%s': %s → %s",
+                    server.name, old_role, new_role_name,
                 )
             else:
                 logging.warning(
@@ -834,7 +866,28 @@ class ServerBase:
                 self.power.create_or_update_power_supply()
                 self.power.report_power_consumption()
             # update virtualization cluster and virtual machines
-            if config.virtual.hypervisor and (
+            # Auto-detect Proxmox: assign to cluster from corosync.conf
+            # without requiring config.virtual.hypervisor to be set.
+            if self._is_proxmox_host() and not config.virtual.hypervisor:
+                cluster_name = self._read_proxmox_cluster_name()
+                if cluster_name:
+                    cluster = nb.virtualization.clusters.get(name=cluster_name)
+                    if cluster:
+                        nb_server = self.get_netbox_server()
+                        if nb_server and getattr(nb_server, 'cluster', None) != cluster:
+                            nb_server.cluster = cluster.id
+                            nb_server.save()
+                            logging.info(
+                                "Auto-assigned Proxmox host '%s' to cluster '%s'",
+                                nb_server.name, cluster_name,
+                            )
+                    else:
+                        logging.warning(
+                            "Proxmox cluster '%s' not found in NetBox — "
+                            "create it first or set virtual.cluster_name",
+                            cluster_name,
+                        )
+            elif config.virtual.hypervisor and (
                 config.register or config.update_all or config.update_hypervisor
             ):
                 self.hypervisor = Hypervisor(server=self)
