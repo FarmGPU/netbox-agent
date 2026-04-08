@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import logging
@@ -292,31 +293,68 @@ class ServerBase:
                 server.serial = serial
                 server.save()
 
-    def _refine_role(self, server):
-        """Refine generic 'Server' role to GPU/CPU/Storage Server based on hardware.
+    # Roles that are auto-assigned and can be corrected by hardware detection.
+    # Manually-set roles (Firewall, JBOF, Hypervisor, etc.) are never touched.
+    _AUTO_ASSIGNABLE_ROLES = {"Server", "GPU Server", "CPU Server", "Storage Server"}
 
-        Only refines when the current role is generic 'Server'.
-        Never downgrades from a more specific role (e.g., won't change
-        'GPU Server' to 'CPU Server' if nvidia-smi fails).
+    @staticmethod
+    def _is_proxmox_host() -> bool:
+        """Detect if this machine is a Proxmox VE hypervisor node."""
+        return os.path.isdir("/etc/pve")
+
+    @staticmethod
+    def _read_proxmox_cluster_name() -> str | None:
+        """Read the Proxmox cluster name from corosync.conf.
+
+        Returns the cluster_name from the totem section, or None if
+        this is a standalone (non-clustered) Proxmox node.
+        """
+        conf = "/etc/pve/corosync.conf"
+        if not os.path.isfile(conf):
+            return None
+        try:
+            with open(conf) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("cluster_name:"):
+                        return line.split(":", 1)[1].strip()
+        except OSError:
+            logging.warning("Could not read %s", conf)
+        return None
+
+    def _refine_role(self, server):
+        """Assign or correct server role based on hardware detection.
+
+        Runs on every sync to ensure the role stays accurate as hardware
+        changes (GPUs added/removed, disks added/removed).
+
+        Only modifies roles in _AUTO_ASSIGNABLE_ROLES. Manually-set roles
+        like Firewall, JBOF, Hypervisor, etc. are never touched.
         """
         current_role = server.role
         if not current_role:
             return
 
         role_name = current_role.name if hasattr(current_role, 'name') else str(current_role)
-        if role_name != "Server":
-            return  # Already refined or manually set — don't touch
+        if role_name not in self._AUTO_ASSIGNABLE_ROLES:
+            return  # Manually set role — don't touch
 
-        # Detect hardware to determine refined role
-        new_role_name = self._detect_server_type()
+        # Proxmox hosts should be Hypervisors, not Storage/CPU servers
+        if self._is_proxmox_host():
+            new_role_name = "Hypervisor"
+        else:
+            # Detect hardware to determine refined role
+            new_role_name = self._detect_server_type()
+
         if new_role_name and new_role_name != "Server":
             role = nb.dcim.device_roles.get(name=new_role_name)
             if role:
+                old_role = role_name
                 server.role = role.id
                 server.save()
                 logging.info(
-                    "Refined role for '%s': Server → %s",
-                    server.name, new_role_name,
+                    "Refined role for '%s': %s → %s",
+                    server.name, old_role, new_role_name,
                 )
             else:
                 logging.warning(
@@ -328,38 +366,66 @@ class ServerBase:
     _SKIP_GPU_VENDORS = {"aspeed technology, inc.", "matrox electronics systems ltd."}
     _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
 
+    # Minimum discrete GPUs to classify as "GPU Server".
+    # Filters out machines with 1-2 GPUs used for display/monitoring.
+    # Most GPU servers have 3+ (4x RTX 4090, 8x H100, 8x B200, etc.)
+    _MIN_GPU_COUNT = 3
+
+    # Minimum physical disk count to classify as "Storage Server".
+    # Standard servers have 1-4 disks (OS + data). Storage servers
+    # have 8+ (NVMe shelves, JBOF-connected, Ceph/Weka nodes).
+    _MIN_STORAGE_DISK_COUNT = 6
+
     def _detect_server_type(self) -> str:
         """Determine server type from hardware.
 
+        Thresholds:
+          GPU Server:     ≥ 3 discrete GPUs (NVIDIA, AMD, Intel Gaudi)
+          Storage Server: ≥ 6 physical disks
+          CPU Server:     everything else
+
+        GPU detection filters out onboard VGA (Aspeed, Matrox) and
+        known non-GPU vendors. Only counts discrete GPUs from NVIDIA,
+        AMD, or Intel (Gaudi).
+
+        Storage detection counts physical block devices excluding
+        virtual devices (loop, ram, zram, device-mapper).
+
         Returns: 'GPU Server', 'CPU Server', or 'Storage Server'.
         """
-        # Check for GPUs
-        has_gpus = False
+        # --- Check for discrete GPUs ---
+        gpu_count = 0
         try:
             from netbox_agent.lshw import LSHW
             lshw = LSHW()
             gpus = lshw.get_hw_linux("gpu")
-            real_gpus = []
+
+            # Known GPU vendors (discrete GPUs, not onboard VGA)
+            _GPU_VENDORS = {"nvidia", "amd", "ati", "habana", "intel"}
+            _SKIP_VENDORS = {"aspeed", "matrox"}
+
             for gpu in gpus:
                 vendor = gpu.get("vendor", "").lower()
                 product = gpu.get("product", "").lower()
-                description = gpu.get("description", "")
-                if vendor in self._SKIP_GPU_VENDORS:
+
+                # Skip known onboard VGA
+                if any(sv in vendor for sv in _SKIP_VENDORS):
                     continue
-                if any(kw in product for kw in self._SKIP_GPU_KEYWORDS):
+                if any(kw in product for kw in ("aspeed", "matrox")):
                     continue
-                if "VGA compatible" in description and "3D" not in description:
-                    continue
-                real_gpus.append(gpu)
-            has_gpus = len(real_gpus) > 0
+
+                # Only count if vendor is a known GPU maker
+                is_known_gpu = any(gv in vendor for gv in _GPU_VENDORS)
+                if is_known_gpu:
+                    gpu_count += 1
         except Exception as e:
             logging.warning("GPU detection failed during role refinement: %s", e)
 
-        if has_gpus:
+        if gpu_count >= self._MIN_GPU_COUNT:
             return "GPU Server"
 
-        # Check for bulk storage (Storage Server indicator)
-        has_bulk_storage = False
+        # --- Check for bulk storage ---
+        disk_count = 0
         try:
             output = subprocess.check_output(
                 ["lsblk", "-J", "-b", "-d", "-o", "NAME,TYPE,SIZE"],
@@ -368,16 +434,17 @@ class ServerBase:
             data = json.loads(output)
             disks = [d for d in data.get("blockdevices", [])
                      if d.get("type") == "disk"
-                     and not d.get("name", "").startswith(("loop", "ram", "zram"))]
-            # 8+ physical disks suggests storage server
-            has_bulk_storage = len(disks) >= 8
+                     and not d.get("name", "").startswith(
+                         ("loop", "ram", "zram", "dm-", "md")
+                     )]
+            disk_count = len(disks)
         except Exception as e:
             logging.warning("Storage detection failed during role refinement: %s", e)
 
-        if has_bulk_storage:
+        if disk_count >= self._MIN_STORAGE_DISK_COUNT:
             return "Storage Server"
 
-        # Default: CPU Server (no GPUs, no bulk storage)
+        # Default: CPU Server
         return "CPU Server"
 
     # --- Tenant auto-detection from running services ---
@@ -799,7 +866,28 @@ class ServerBase:
                 self.power.create_or_update_power_supply()
                 self.power.report_power_consumption()
             # update virtualization cluster and virtual machines
-            if config.virtual.hypervisor and (
+            # Auto-detect Proxmox: assign to cluster from corosync.conf
+            # without requiring config.virtual.hypervisor to be set.
+            if self._is_proxmox_host() and not config.virtual.hypervisor:
+                cluster_name = self._read_proxmox_cluster_name()
+                if cluster_name:
+                    cluster = nb.virtualization.clusters.get(name=cluster_name)
+                    if cluster:
+                        nb_server = self.get_netbox_server()
+                        if nb_server and getattr(nb_server, 'cluster', None) != cluster:
+                            nb_server.cluster = cluster.id
+                            nb_server.save()
+                            logging.info(
+                                "Auto-assigned Proxmox host '%s' to cluster '%s'",
+                                nb_server.name, cluster_name,
+                            )
+                    else:
+                        logging.warning(
+                            "Proxmox cluster '%s' not found in NetBox — "
+                            "create it first or set virtual.cluster_name",
+                            cluster_name,
+                        )
+            elif config.virtual.hypervisor and (
                 config.register or config.update_all or config.update_hypervisor
             ):
                 self.hypervisor = Hypervisor(server=self)

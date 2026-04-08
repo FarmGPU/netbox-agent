@@ -14,6 +14,7 @@ class LSHW:
         self.power = []
         self.disks = []
         self.gpus = []
+        self.accelerators = []  # Non-GPU compute accelerators (Gaudi, FPGA, DPU, etc.)
         self.vendor = "Unknown"
         self.product = "Unknown"
         self.chassis_serial = "Unknown"
@@ -67,6 +68,8 @@ class LSHW:
             return self.cpus
         if hwclass == "gpu":
             return self.gpus
+        if hwclass == "accelerator":
+            return self.accelerators
         if hwclass == "network":
             return self.interfaces
         if hwclass == "storage":
@@ -172,14 +175,68 @@ class LSHW:
                 }
             )
 
+    # Vendors whose "coprocessor" class PCI devices are actually GPUs,
+    # not custom accelerators. These get routed to self.gpus, not self.accelerators.
+    _GPU_VENDORS = {"habana", "intel", "amd", "nvidia"}
+
     def find_gpus(self, obj):
         if "product" in obj:
             infos = {
                 "product": obj.get("product", "Unknown GPU"),
                 "vendor": obj.get("vendor", "Unknown"),
                 "description": obj.get("description", ""),
+                "businfo": obj.get("businfo", ""),  # PCI bus ID for driver lookup
             }
             self.gpus.append(infos)
+
+    # Descriptions that indicate chipset infrastructure, NOT real accelerators.
+    # These are IOMMU, host bridges, system peripherals, etc. that lshw
+    # classifies as "generic" but are not compute accelerators.
+    _INFRA_DESCRIPTIONS = {
+        "iommu", "system peripheral", "generic system peripheral",
+        "non-essential instrumentation", "encryption controller",
+        "host bridge", "pci bridge", "isa bridge", "smi bridge",
+        "signal processing controller", "communication controller",
+        "pic", "dma controller", "timer",
+        "performance counters",     # Intel CPU uncore PMU counters
+        "scsi enclosure",           # Dell storage enclosure managers (Fryer U.2 etc.)
+    }
+
+    def find_accelerators(self, obj):
+        """Route PCI devices under coprocessor/generic/processing classes.
+
+        Known GPU vendors (Habana/Intel Gaudi, AMD, NVIDIA) get routed to
+        self.gpus — they are general-purpose GPUs regardless of PCI class.
+
+        Everything else goes to self.accelerators (Pliops, FPGAs, QAT, etc.).
+        Chipset infrastructure (IOMMU, system peripherals) is filtered out.
+        """
+        if "product" not in obj:
+            return
+        description = obj.get("description", "").lower()
+        # Skip chipset infrastructure
+        if any(infra in description for infra in self._INFRA_DESCRIPTIONS):
+            return
+
+        vendor = obj.get("vendor", "Unknown")
+        vendor_lower = vendor.lower()
+
+        # Known GPU vendors under non-display PCI classes → route to GPUs
+        if any(gv in vendor_lower for gv in self._GPU_VENDORS):
+            self.find_gpus(obj)
+            return
+
+        # Everything else is a true accelerator (Pliops, FPGA, custom hardware)
+        self.accelerators.append({
+            "product": obj.get("product", "Unknown Accelerator"),
+            "vendor": vendor,
+            "description": obj.get("description", ""),
+            "businfo": obj.get("businfo", ""),
+            "class": obj.get("class", ""),
+        })
+
+    # PCI device classes that indicate compute accelerators (not CPUs, not GPUs)
+    _ACCELERATOR_CLASSES = {"coprocessor", "generic", "processing"}
 
     def walk_bridge(self, obj):
         """Recursively walk PCI bridge tree to find all devices."""
@@ -194,6 +251,8 @@ class LSHW:
                 self.find_network(child)
             elif cls == "display":
                 self.find_gpus(child)
+            elif cls in self._ACCELERATOR_CLASSES:
+                self.find_accelerators(child)
             elif cls == "bridge":
                 self.walk_bridge(child)
 
@@ -209,6 +268,8 @@ class LSHW:
                         self.find_network(grandchild)
                     elif gc_cls == "display":
                         self.find_gpus(grandchild)
+                    elif gc_cls in self._ACCELERATOR_CLASSES:
+                        self.find_accelerators(grandchild)
                     elif gc_cls == "bridge":
                         self.walk_bridge(grandchild)
 

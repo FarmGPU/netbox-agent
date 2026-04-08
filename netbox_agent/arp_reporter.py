@@ -191,11 +191,30 @@ def _get_scan_interfaces(config) -> list[str]:
     ignore_re = getattr(config.network, "ignore_interfaces", r"(dummy.*|docker.*)")
     interfaces = []
 
+    # Virtual/container interfaces that should never be scanned.
+    # These waste time (arp-scan times out on bridges) and produce
+    # noise (container-internal MACs are not useful for inventory).
+    _SKIP_PREFIXES = (
+        "br-",      # Docker custom network bridges
+        "veth",     # Docker/container veth pairs
+        "vnet",     # libvirt/KVM virtual NICs
+        "virbr",    # libvirt default bridge
+        "cni",      # Kubernetes CNI
+        "flannel",  # Kubernetes flannel overlay
+        "calico",   # Kubernetes Calico
+        "tunl",     # tunnel interfaces
+        "podman",   # Podman container bridge
+        "wg",       # WireGuard tunnels
+        "tailscale", # Tailscale tunnel
+    )
+
     for iface in sorted(os.listdir("/sys/class/net/")):
         if not os.path.islink(f"/sys/class/net/{iface}"):
             continue
-        # Skip virtual/non-physical interfaces that waste scan time
-        if iface in ("lo", "podman0", "virbr0", "cni0", "flannel.1"):
+        # Skip loopback and known virtual interfaces
+        if iface == "lo":
+            continue
+        if any(iface.startswith(p) for p in _SKIP_PREFIXES):
             continue
         if ignore_re and re.match(ignore_re, iface):
             continue

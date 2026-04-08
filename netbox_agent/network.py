@@ -17,15 +17,82 @@ from netbox_agent.lldp import LLDP
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
 
 
-def _sync_transceiver_module(device_id, interface, ethtool_data):
-    """Create or update a transceiver Module linked to an interface.
+# Per-device cache: interface MAC (upper) → nic_module pynetbox object
+_nic_module_cache = {}
 
-    Creates: Module Type (if new) → Module Bay → Module → links to Interface.
-    Skips if no transceiver data, or if interface already has a module linked.
+
+def _clear_nic_module_cache():
+    """Reset the NIC module cache.  Call once at the start of each device sync."""
+    global _nic_module_cache
+    _nic_module_cache = {}
+
+
+def _find_or_create_manufacturer(vendor):
+    """Return a pynetbox Manufacturer for *vendor*, creating if needed."""
+    mfr_slug = re.sub(r"[^a-z0-9-]", "", vendor.lower().replace(" ", "-"))[:50]
+    mfr = nb.dcim.manufacturers.get(slug=mfr_slug)
+    if not mfr:
+        mfr = nb.dcim.manufacturers.get(name=vendor)
+    if not mfr:
+        mfr = nb.dcim.manufacturers.create(name=vendor, slug=mfr_slug)
+        logging.info("Created manufacturer: %s", vendor)
+    return mfr
+
+
+def _find_nic_module_for_interface(device_id, interface):
+    """Find the NIC Module that owns a given interface.
+
+    The module sync (``modules.py``) creates per-port NIC modules in bays
+    named ``NIC-0``, ``NIC-1``, etc. with the interface MAC as the module
+    serial.  This function looks up that module by matching the interface's
+    MAC address.
+
+    Returns the pynetbox Module object, or None.
+    """
+    global _nic_module_cache
+
+    mac = getattr(interface, "mac_address", None)
+    if not mac:
+        return None
+    mac_upper = str(mac).upper()
+
+    if mac_upper in _nic_module_cache:
+        return _nic_module_cache[mac_upper]
+
+    # Build cache on first miss: load all NIC-* bays for this device
+    if not _nic_module_cache.get("_loaded_{}".format(device_id)):
+        all_bays = list(nb.dcim.module_bays.filter(device_id=device_id))
+        for bay in all_bays:
+            if not bay.name.startswith("NIC-"):
+                continue
+            modules = list(nb.dcim.modules.filter(module_bay_id=bay.id))
+            for mod in modules:
+                if mod.serial:
+                    _nic_module_cache[mod.serial.upper()] = mod
+        _nic_module_cache["_loaded_{}".format(device_id)] = True
+
+    return _nic_module_cache.get(mac_upper)
+
+
+def _sync_transceiver_module(device_id, interface, ethtool_data):
+    """Create or update a transceiver Module as a child of its NIC module.
+
+    The module sync (``modules.py``) creates per-port NIC modules in bays
+    ``NIC-0``, ``NIC-1``, etc.  This function adds a child ``XCVR-0`` bay
+    to the NIC module and installs the transceiver there::
+
+        Device
+          └─ ModuleBay  "NIC-2"
+               └─ Module  ConnectX-7          ← created by modules.py
+                    └─ ModuleBay  "XCVR-0"
+                         └─ Module  T1Q112    ← created here
+
+    Falls back to a device-level ``<iface>-xcvr`` bay when no NIC module is
+    found (e.g. because modules.py hasn't run yet or the NIC is virtual).
 
     Args:
         device_id: NetBox device ID
-        interface: pynetbox interface object
+        interface: pynetbox interface object (already saved)
         ethtool_data: dict from Ethtool.parse() with transceiver_* fields
     """
     if not ethtool_data or not isinstance(ethtool_data, dict):
@@ -41,26 +108,26 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
     if not vendor and not part_number:
         return
 
-    # Use form factor + part number as model name
     model = part_number or form_factor or "Unknown Transceiver"
     if not vendor:
         vendor = "Unknown"
 
-    # Skip if interface already has a module
-    if getattr(interface, "module", None):
-        return
-
     try:
-        # Find or create manufacturer
-        mfr_slug = vendor.lower().replace(" ", "-").replace(".", "")[:50]
-        mfr = nb.dcim.manufacturers.get(slug=mfr_slug)
-        if not mfr:
-            mfr = nb.dcim.manufacturers.get(name=vendor)
-        if not mfr:
-            mfr = nb.dcim.manufacturers.create(name=vendor, slug=mfr_slug)
-            logging.info("Created manufacturer: %s", vendor)
+        # --- Find parent NIC module (created by modules.py) ---
+        nic_module = _find_nic_module_for_interface(device_id, interface)
 
-        # Find or create module type
+        # Link interface to its NIC module
+        if nic_module:
+            current_mod = getattr(interface, "module", None)
+            current_mod_id = current_mod.id if hasattr(current_mod, "id") else current_mod
+            if current_mod_id != nic_module.id:
+                interface.module = nic_module.id
+                interface.save()
+
+        # --- Transceiver manufacturer ---
+        mfr = _find_or_create_manufacturer(vendor)
+
+        # --- Transceiver ModuleType ---
         module_type = None
         if part_number:
             existing = list(nb.dcim.module_types.filter(
@@ -78,48 +145,76 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
                 model=model,
                 part_number=part_number,
             )
-            logging.info("Created module type: %s %s", vendor, model)
+            logging.info("Created transceiver module type: %s %s", vendor, model)
 
-        # Find or create module bay
-        bay_name = "%s-xcvr" % interface.name
-        bays = list(nb.dcim.module_bays.filter(device_id=device_id, name=bay_name))
-        if bays:
-            bay = bays[0]
+        # --- XCVR ModuleBay (child of NIC module, or device-level fallback) ---
+        if nic_module:
+            # Each per-port NIC module gets one XCVR child bay
+            xcvr_bay_name = "XCVR-0"
+            xcvr_bays = list(nb.dcim.module_bays.filter(
+                module_id=nic_module.id, name=xcvr_bay_name))
+            if xcvr_bays:
+                bay = xcvr_bays[0]
+            else:
+                # NetBox requires device even for module-level bays
+                bay = nb.dcim.module_bays.create(
+                    device=device_id, module=nic_module.id,
+                    name=xcvr_bay_name)
+                logging.info("Created XCVR bay: %s on NIC module %s (id=%s)",
+                             xcvr_bay_name, nic_module.module_type, nic_module.id)
         else:
-            bay = nb.dcim.module_bays.create(device=device_id, name=bay_name)
+            # Legacy fallback: device-level bay
+            bay_name = "%s-xcvr" % interface.name
+            bays = list(nb.dcim.module_bays.filter(
+                device_id=device_id, name=bay_name))
+            bay = bays[0] if bays else nb.dcim.module_bays.create(
+                device=device_id, name=bay_name)
 
-        # Check if module already exists by serial on this device
+        # --- Transceiver Module ---
+        existing_modules = list(nb.dcim.modules.filter(module_bay_id=bay.id))
+        if existing_modules:
+            module = existing_modules[0]
+            dirty = False
+            if serial and module.serial != serial:
+                module.serial = serial
+                dirty = True
+            if module.module_type.id != module_type.id:
+                module.module_type = module_type.id
+                dirty = True
+            if dirty:
+                module.save()
+                logging.info("Updated transceiver: %s %s (SN:%s) on %s",
+                             vendor, model, serial, interface.name)
+            return
+
+        # Check by serial — optic may have moved bays
         if serial:
-            existing_modules = list(nb.dcim.modules.filter(
+            by_sn = list(nb.dcim.modules.filter(
                 serial=serial, device_id=device_id))
-            if existing_modules:
-                module = existing_modules[0]
-                if module.module_bay and module.module_bay.id != bay.id:
-                    module.module_bay = bay.id
-                    module.save()
-                interface.module = module.id
-                interface.save()
+            if by_sn:
+                module = by_sn[0]
+                module.module_bay = bay.id
+                module.module_type = module_type.id
+                module.save()
+                logging.info("Moved transceiver SN:%s → %s", serial, bay.name)
                 return
 
-        # Create new module
-        module = nb.dcim.modules.create(
+        # Create new transceiver module
+        nb.dcim.modules.create(
             device=device_id,
             module_bay=bay.id,
             module_type=module_type.id,
             serial=serial or "",
+            custom_fields={"owner": "FarmGPU"},
         )
-
-        # Link interface to module
-        interface.module = module.id
-        interface.save()
-
         logging.info(
-            "Created transceiver module: %s %s (SN:%s) on %s",
+            "Created transceiver: %s %s (SN:%s) on %s",
             vendor, model, serial, interface.name,
         )
+
     except Exception:
         logging.debug(
-            "Failed to create transceiver module for %s", interface.name,
+            "Failed to sync transceiver for %s", interface.name,
             exc_info=True,
         )
 
@@ -203,16 +298,33 @@ class Network(object):
     def get_network_type():
         return NotImplementedError
 
+    # Proxmox VE creates many virtual bridge/firewall/tap interfaces that
+    # clutter NetBox.  When /etc/pve/ exists (present on every PVE node)
+    # these patterns are automatically appended to the configured
+    # ignore_interfaces regex — no manual config change required.
+    _PROXMOX_IFACE_PATTERNS = r"(fwbr.*|fwln.*|fwpr.*|tap\d+i\d+|vmbr\d+|ovs.*)"
+
+    @staticmethod
+    def _build_ignore_re():
+        """Return the compiled ignore regex, extending it for Proxmox hosts."""
+        base = config.network.ignore_interfaces or ""
+        if os.path.isdir("/etc/pve"):
+            if base:
+                base = f"{base}|{ServerNetwork._PROXMOX_IFACE_PATTERNS}"
+            else:
+                base = ServerNetwork._PROXMOX_IFACE_PATTERNS
+            logging.debug("Proxmox detected — extended ignore pattern: %s", base)
+        return re.compile(base) if base else None
+
     def scan(self):
         nics = []
+        ignore_re = self._build_ignore_re()
         for interface in os.listdir("/sys/class/net/"):
             # ignore if it's not a link (ie: bonding_masters etc)
             if not os.path.islink("/sys/class/net/{}".format(interface)):
                 continue
 
-            if config.network.ignore_interfaces and re.match(
-                config.network.ignore_interfaces, interface
-            ):
+            if ignore_re and ignore_re.match(interface):
                 logging.debug("Ignore interface {interface}".format(interface=interface))
                 continue
 
@@ -287,10 +399,11 @@ class Network(object):
                 "name": interface,
                 "mac": mac,
                 "ip": [
-                    "{}/{}".format(x["addr"], IPAddress(x["mask"]).netmask_bits()) for x in ip_addr
+                    "{}/{}".format(x["addr"], IPAddress(x["mask"]).netmask_bits())
+                    for x in ip_addr
+                    if "addr" in x and "mask" in x
                 ]
-                if ip_addr
-                else None,  # FIXME: handle IPv6 addresses
+                or None,  # FIXME: handle IPv6 addresses
                 "ethtool": ethtool,
                 "virtual": virtual,
                 "vlan": vlan,
@@ -493,6 +606,7 @@ class Network(object):
                 "name": nic["name"],
                 "type": nic_type,
                 "mgmt_only": mgmt,
+                "custom_fields": {"managed_by": "netbox-agent"},
             }
         )
         if nic["mac"] and len(nic["mac"]) == 17:
@@ -708,13 +822,23 @@ class Network(object):
     def create_or_update_netbox_network_cards(self):
         if config.update_all is None or config.update_network is None:
             return None
+        _clear_nic_module_cache()
         logging.debug("Creating/Updating NIC...")
 
-        # delete unknown interface
+        # delete unknown interface — but respect managed_by ownership.
+        # Interfaces created by other workers (bmc-scan, proxmox-sync)
+        # may not be visible to the OS and must not be deleted.
         nb_nics = list(self.get_netbox_network_cards())
         local_nics = [self._nic_identifier(x) for x in self.nics]
         for nic in list(nb_nics):
             if self._nic_identifier(nic) not in local_nics:
+                managed_by = (nic.custom_fields or {}).get("managed_by", "")
+                if managed_by and managed_by != "netbox-agent":
+                    logging.debug(
+                        "Skipping deletion of '%s' (managed_by=%s)",
+                        nic.name, managed_by,
+                    )
+                    continue
                 logging.info(
                     "Deleting netbox interface {name} because not present locally".format(
                         name=nic.name
@@ -769,6 +893,20 @@ class Network(object):
                             else:
                                 raise
                         # Update local reference so downstream code sees the change
+                        self.device = nb.dcim.devices.get(self.device.id)
+
+                    # Clear oob_ip if it points to this IP (NetBox blocks
+                    # unassigning an IP that is designated as oob_ip).
+                    device_oob = getattr(self.device, "oob_ip", None)
+                    if device_oob and device_oob.id == netbox_ip.id:
+                        logging.info(
+                            "Clearing oob_ip %s before unassigning from %s",
+                            netbox_ip.address,
+                            getattr(self.device, "name", "?"),
+                        )
+                        fresh_device = nb.dcim.devices.get(self.device.id)
+                        fresh_device.oob_ip = None
+                        fresh_device.save()
                         self.device = nb.dcim.devices.get(self.device.id)
 
                     logging.info(
