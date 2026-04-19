@@ -11,6 +11,7 @@ import logging
 import re
 import subprocess
 import time
+from pathlib import Path
 
 from netbox_agent.config import netbox_instance as nb
 from netbox_agent.lshw import LSHW
@@ -662,6 +663,14 @@ class ModuleManager:
             logger.debug("nvme list failed: %s", e)
             return None
 
+    @staticmethod
+    def _read_sysfs(path):
+        """Read a sysfs file and return stripped content, or None on failure."""
+        try:
+            return Path(path).read_text().strip() or None
+        except (OSError, IOError):
+            return None
+
     def _parse_lsblk_storage(self, lsblk_data):
         """
         Parse lsblk JSON output into storage items for NetBox modules.
@@ -703,6 +712,26 @@ class ModuleManager:
             size_bytes = blk.get("size")
             rev = (blk.get("rev") or "").strip() or None
 
+            # Treat placeholder serials as missing
+            if serial in ("_", "0", "unknown", "N/A", "UNKNOWN"):
+                serial = None
+
+            # For NVMe devices, read identity from sysfs controller
+            # (more reliable than lsblk — works even when NVMe char device is locked)
+            if name.startswith("nvme") and "n" in name:
+                ctrl_name = name.split("n")[0]  # nvme0n1 → nvme0
+                sysfs_ctrl = Path(f"/sys/class/nvme/{ctrl_name}")
+                if sysfs_ctrl.exists():
+                    sysfs_serial = self._read_sysfs(sysfs_ctrl / "serial")
+                    sysfs_model = self._read_sysfs(sysfs_ctrl / "model")
+                    sysfs_fw = self._read_sysfs(sysfs_ctrl / "firmware_rev")
+                    if sysfs_serial:
+                        serial = sysfs_serial
+                    if sysfs_model and not model:
+                        model = sysfs_model
+                    if sysfs_fw and not rev:
+                        rev = sysfs_fw
+
             # Skip devices with no model AND no serial (virtual/unknown)
             if not model and not serial:
                 continue
@@ -713,7 +742,7 @@ class ModuleManager:
             if serial:
                 seen_serials.add(serial)
 
-            # Enrich NVMe devices with nvme-cli data
+            # Enrich NVMe devices with nvme-cli data (optional, may fail on locked drives)
             nvme_info = nvme_by_name.get(name)
             if nvme_info:
                 if not model:
