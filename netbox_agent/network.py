@@ -331,12 +331,10 @@ class Network(object):
             ip_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET, [])
             ip6_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET6, [])
             if config.network.ignore_ips:
-                for i, ip in enumerate(ip_addr):
-                    if re.match(config.network.ignore_ips, ip["addr"]):
-                        ip_addr.pop(i)
-                for i, ip in enumerate(ip6_addr):
-                    if re.match(config.network.ignore_ips, ip["addr"]):
-                        ip6_addr.pop(i)
+                ip_addr = [ip for ip in ip_addr
+                           if not re.match(config.network.ignore_ips, ip["addr"])]
+                ip6_addr = [ip for ip in ip6_addr
+                            if not re.match(config.network.ignore_ips, ip["addr"])]
 
             # netifaces returns a ipv6 netmask that netaddr does not understand.
             # this strips the netmask down to the correct format for netaddr,

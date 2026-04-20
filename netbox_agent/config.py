@@ -111,7 +111,7 @@ def get_config():
     p.add_argument("--slot_location.regex", help="Slot location regex to extract slot name")
     p.add_argument(
         "--network.ignore_interfaces",
-        default=r"(dummy.*|docker.*)",
+        default=r"(lo|dummy.*|docker.*|br-.*|veth.*|vnet.*|virbr.*)",
         help="Regex to ignore interfaces",
     )
     p.add_argument(
