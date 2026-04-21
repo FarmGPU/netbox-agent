@@ -162,13 +162,32 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
                     name=xcvr_bay_name)
                 logging.info("Created XCVR bay: %s on NIC module %s (id=%s)",
                              xcvr_bay_name, nic_module.module_type, nic_module.id)
+
+            # Clean up legacy device-level fallback bay if it exists
+            legacy_bay_name = "%s-xcvr" % interface.name
+            legacy_bays = list(nb.dcim.module_bays.filter(
+                device_id=device_id, name=legacy_bay_name))
+            for lb in legacy_bays:
+                # Migrate any module from legacy bay to proper XCVR bay
+                legacy_mods = list(nb.dcim.modules.filter(module_bay_id=lb.id))
+                for lm in legacy_mods:
+                    logging.info(
+                        "Migrating transceiver from legacy bay '%s' to '%s' on NIC module",
+                        legacy_bay_name, xcvr_bay_name,
+                    )
+                    lm.module_bay = bay.id
+                    lm.save()
+                lb.delete()
+                logging.info("Deleted legacy fallback bay '%s'", legacy_bay_name)
         else:
-            # Legacy fallback: device-level bay
-            bay_name = "%s-xcvr" % interface.name
-            bays = list(nb.dcim.module_bays.filter(
-                device_id=device_id, name=bay_name))
-            bay = bays[0] if bays else nb.dcim.module_bays.create(
-                device=device_id, name=bay_name)
+            # No NIC module found — skip creating device-level fallback bays.
+            # The module sync (modules.py) should create NIC modules first.
+            # Transceiver will be picked up on the next run once NIC modules exist.
+            logging.debug(
+                "No NIC module found for interface '%s' — skipping transceiver bay creation",
+                interface.name,
+            )
+            return
 
         # --- Transceiver Module ---
         existing_modules = list(nb.dcim.modules.filter(module_bay_id=bay.id))
