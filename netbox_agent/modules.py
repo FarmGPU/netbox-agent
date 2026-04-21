@@ -183,9 +183,13 @@ class ModuleManager:
             })
         return items
 
-    # BMC/onboard VGA controllers that should NOT be tracked as GPU modules
-    _SKIP_GPU_VENDORS = {"aspeed technology, inc.", "matrox electronics systems ltd."}
-    _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
+    # BMC/onboard VGA and baseboard management controllers that should NOT be tracked as GPU modules
+    _SKIP_GPU_VENDORS = {
+        "aspeed technology, inc.",
+        "matrox electronics systems ltd.",
+        "intelligent platform management interface (ipmi) forum (intel, hp, nec, dell)",
+    }
+    _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible", "ipmi", "pnp device ipi"}
 
     def _get_local_gpus(self):
         """Detect GPUs via lshw + vendor tools for serials and driver info.
@@ -910,10 +914,18 @@ class ModuleManager:
                 name = psu.get("Name", "Unknown PSU")
                 serial = psu.get("Serial Number", "")
                 manufacturer = psu.get("Manufacturer", "Unknown")
-                if serial in ("", "Not Specified", "To Be Filled By O.E.M.", "N/A"):
+                if serial in ("", "Not Specified", "To Be Filled By O.E.M.", "N/A", "NULL"):
                     serial = None
                 if name in ("Not Specified", "To Be Filled By O.E.M."):
                     name = "Unknown PSU"
+                # Skip PSUs with no usable data (BMC doesn't expose FRU details)
+                max_power = psu.get("Max Power Capacity", "0 W")
+                if manufacturer in ("NULL", "Unknown", "") and serial is None and (
+                    "0 W" in str(max_power) or max_power in ("Unknown", "")
+                ):
+                    logger.debug("Skipping PSU with no data: %s (manufacturer=%s, max_power=%s)",
+                                 psu.get("Name", "?"), manufacturer, max_power)
+                    continue
                 items.append({
                     "product": f"{manufacturer} {name}".strip(),
                     "vendor": manufacturer,
