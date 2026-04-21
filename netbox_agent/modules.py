@@ -1077,9 +1077,70 @@ class ModuleManager:
         all_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
         category_bays = sorted(
             [b for b in all_bays if b.name.startswith(f"{prefix}-")],
-            key=lambda b: b.name,
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
         )
         return category_bays
+
+    def _prune_and_renumber_bays(self, device, category, detected_count):
+        """
+        Remove excess empty bays and renumber remaining bays sequentially.
+
+        If the device has more bays than detected items for a category,
+        the extras are orphans from a prior detection that no longer
+        matches reality (drive removed, transient detection, etc.).
+
+        After pruning, renumber bays to close gaps:
+        SSD-0, SSD-1, ..., SSD-N with no missing indices.
+        """
+        prefix = CATEGORIES[category]["prefix"]
+        all_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
+        category_bays = sorted(
+            [b for b in all_bays if b.name.startswith(f"{prefix}-")],
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
+        )
+
+        if len(category_bays) <= detected_count:
+            return  # Nothing to prune
+
+        # Separate populated and empty bays
+        populated_bays = []
+        empty_bays = []
+        for bay in category_bays:
+            if bay.installed_module:
+                populated_bays.append(bay)
+            else:
+                empty_bays.append(bay)
+
+        excess = len(category_bays) - detected_count
+        to_delete = empty_bays[:excess]
+
+        for bay in to_delete:
+            logger.info(
+                "Pruning orphan bay '%s' on '%s' (detected %d, had %d bays)",
+                bay.name, device.name, detected_count, len(category_bays),
+            )
+            _api_retry(bay.delete)
+
+        if not to_delete:
+            return  # Nothing was pruned, skip renumber
+
+        # Renumber remaining bays sequentially
+        remaining_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
+        remaining_category = sorted(
+            [b for b in remaining_bays if b.name.startswith(f"{prefix}-")],
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
+        )
+
+        for i, bay in enumerate(remaining_category):
+            expected_name = f"{prefix}-{i}"
+            if bay.name != expected_name:
+                logger.info(
+                    "Renumbering bay '%s' → '%s' on '%s'",
+                    bay.name, expected_name, device.name,
+                )
+                bay.name = expected_name
+                bay.position = expected_name
+                _api_retry(bay.save)
 
     def _get_device_modules(self, device, category):
         """
@@ -1144,7 +1205,7 @@ class ModuleManager:
         spare_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=spare.id))
         spare_category_bays = sorted(
             [b for b in spare_bays if b.name.startswith(f"{prefix}-")],
-            key=lambda b: b.name,
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
         )
 
         # Find an unoccupied bay
@@ -1351,6 +1412,9 @@ class ModuleManager:
                         mod.serial, self.device.name,
                     )
                     self._move_to_spare(mod, category)
+
+        # Step 4: Prune orphan empty bays and renumber sequentially
+        self._prune_and_renumber_bays(self.device, category, len(local_items))
 
     # ------------------------------------------------------------------ #
     #  Public Interface
