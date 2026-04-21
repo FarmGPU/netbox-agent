@@ -1185,15 +1185,20 @@ class ModuleManager:
         """
         Sync a single hardware category.
 
-        Algorithm:
+        Algorithm (serial-first, stable bay assignment):
         1. Ensure device has enough module bays
-        2. For each local item:
-           - Serial on this device, correct bay → no-op (update module type if changed)
-           - Serial on this device, wrong bay → update bay
-           - Serial on spare → re-parent here
-           - Serial on other device → re-parent (hardware moved)
-           - Serial not found → create new module
-        3. Existing modules NOT in local detection → move to spare
+        2. Pass 1 — match existing: for each detected item with a serial
+           already on this device, mark it matched and leave its bay alone.
+           Only update module_type if it changed.
+        3. Pass 2 — place new/remote: for detected items NOT matched in
+           pass 1, find an empty bay and either re-parent from another
+           device or create new.
+        4. Move unmatched existing modules to spare (hardware removed).
+
+        Key invariant: modules already on the correct device are NEVER
+        moved between bays. Detection order may vary between boots
+        (NVMe enumeration, PCI probe order) but bay assignments are
+        stable once set.
         """
         if not local_items:
             # Move all existing modules in this category to spare
@@ -1214,58 +1219,64 @@ class ModuleManager:
             if mod.serial:
                 existing_by_serial[mod.serial] = mod
 
+        # Track which bays are occupied and which modules are matched
         matched_module_ids = set()
+        occupied_bay_ids = set()
+        for mod in existing_modules:
+            if mod.module_bay:
+                bay_id = mod.module_bay.id if hasattr(mod.module_bay, "id") else mod.module_bay
+                occupied_bay_ids.add(bay_id)
+
         has_serial = any(item.get("serial") for item in local_items)
 
-        for idx, item in enumerate(local_items):
-            serial = item.get("serial")
-            bay = bays[idx] if idx < len(bays) else None
+        # Items that need placement (not already on this device)
+        needs_placement = []
 
-            if not bay:
-                logger.warning(
-                    "No bay available at index %d for %s on %s",
-                    idx, prefix, self.device.name,
-                )
+        # --- Pass 1: match serials already on this device (stable bays) ---
+        for item in local_items:
+            serial = item.get("serial")
+            if not serial:
+                needs_placement.append(item)
                 continue
 
+            if serial in existing_by_serial:
+                mod = existing_by_serial[serial]
+                matched_module_ids.add(mod.id)
+
+                # Update module type if changed — but never move bays
+                module_type = self._resolve_module_type(category, item)
+                mod_mt_id = None
+                if mod.module_type:
+                    mod_mt_id = mod.module_type.id if hasattr(mod.module_type, "id") else mod.module_type
+                if mod_mt_id != module_type.id:
+                    mod.module_type = module_type.id
+                    _api_retry(mod.save)
+                    logger.info("Updated module type serial=%s on %s", serial, self.device.name)
+            else:
+                needs_placement.append(item)
+
+        # --- Pass 2: place new/remote items into empty bays ---
+        # Build list of empty bays (not occupied by any module)
+        empty_bays = [b for b in bays if b.id not in occupied_bay_ids]
+
+        for item in needs_placement:
+            serial = item.get("serial")
             module_type = self._resolve_module_type(category, item)
 
             if serial:
-                # --- Serial-based matching ---
-                # Check if already on this device
-                if serial in existing_by_serial:
-                    mod = existing_by_serial[serial]
-                    matched_module_ids.add(mod.id)
-                    updated = False
-
-                    # Check bay assignment
-                    mod_bay_name = None
-                    if mod.module_bay:
-                        mod_bay_name = getattr(mod.module_bay, "name", None) or getattr(mod.module_bay, "display", None)
-                    if mod_bay_name != bay.name:
-                        self._vacate_bay(bay, category)
-                        mod.module_bay = bay.id
-                        updated = True
-
-                    # Check module type
-                    mod_mt_id = None
-                    if mod.module_type:
-                        mod_mt_id = mod.module_type.id if hasattr(mod.module_type, "id") else mod.module_type
-                    if mod_mt_id != module_type.id:
-                        mod.module_type = module_type.id
-                        updated = True
-
-                    if updated:
-                        _api_retry(mod.save)
-                        logger.info("Updated module serial=%s on %s", serial, self.device.name)
-                    continue
-
-                # Check if exists anywhere else
+                # Check if exists on another device (hardware moved here)
                 remote_mod = self._find_module_by_serial(serial)
                 if remote_mod:
+                    if not empty_bays:
+                        logger.warning(
+                            "No empty bay for serial=%s on %s — skipping",
+                            serial, self.device.name,
+                        )
+                        continue
+                    target_bay = empty_bays.pop(0)
+                    self._reparent_module(remote_mod, self.device, target_bay)
                     matched_module_ids.add(remote_mod.id)
-                    self._vacate_bay(bay, category)
-                    self._reparent_module(remote_mod, self.device, bay)
+                    occupied_bay_ids.add(target_bay.id)
 
                     # Update module type if changed
                     mod_mt_id = None
@@ -1277,24 +1288,34 @@ class ModuleManager:
                     continue
 
                 # Not found anywhere — create new
-                self._vacate_bay(bay, category)
+                if not empty_bays:
+                    logger.warning(
+                        "No empty bay for new serial=%s on %s — skipping",
+                        serial, self.device.name,
+                    )
+                    continue
+                target_bay = empty_bays.pop(0)
                 new_mod = _api_retry(nb.dcim.modules.create, {
                     "device": self.device.id,
-                    "module_bay": bay.id,
+                    "module_bay": target_bay.id,
                     "module_type": module_type.id,
                     "serial": serial,
                     "status": "active",
                     "custom_fields": self._default_module_custom_fields(),
                 })
                 matched_module_ids.add(new_mod.id)
+                occupied_bay_ids.add(target_bay.id)
                 logger.info(
                     "Created module %s serial=%s on %s bay=%s",
-                    item["product"], serial, self.device.name, bay.name,
+                    item["product"], serial, self.device.name, target_bay.name,
                 )
 
             else:
                 # --- No serial (e.g., CPUs): positional matching ---
-                # Match by bay index position
+                # For serialless items, use first available bay (occupied or empty)
+                bay = bays[local_items.index(item)] if local_items.index(item) < len(bays) else None
+                if not bay:
+                    continue
                 modules_in_bay = list(_api_retry(nb.dcim.modules.filter, module_bay_id=bay.id))
                 if modules_in_bay:
                     mod = modules_in_bay[0]
@@ -1321,7 +1342,7 @@ class ModuleManager:
                         item["product"], self.device.name, bay.name,
                     )
 
-        # Step 3: Move unmatched existing modules to spare
+        # Step 3: Move unmatched existing modules to spare (hardware removed)
         if has_serial:
             for mod in existing_modules:
                 if mod.id not in matched_module_ids:
