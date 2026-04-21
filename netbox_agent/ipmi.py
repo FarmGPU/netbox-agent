@@ -75,11 +75,17 @@ class IPMI:
             logger.error("IPMI decoding failed, missing: %s", e.args[0])
             return {}
 
-        # Build IP list — empty when BMC has no assigned IP
+        # Build IP list — empty when BMC has no assigned IP or IP is filtered
         ip = fields.get("IP Address", "")
         ip_list = []
         if ip and ip != "0.0.0.0":
-            ip_list = [f"{ip}/32"]
+            import re
+            from netbox_agent.config import config
+            ignore_pattern = getattr(config.network, "ignore_ips", None) if hasattr(config, "network") else None
+            if ignore_pattern and re.match(ignore_pattern, ip):
+                logger.info("IPMI: MAC=%s IP=%s filtered by ignore_ips — interface created without IP", mac, ip)
+            else:
+                ip_list = [f"{ip}/32"]
         else:
             logger.info("IPMI: MAC=%s but IP unassigned (0.0.0.0) — interface created without IP", mac)
 
