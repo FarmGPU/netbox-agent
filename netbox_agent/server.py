@@ -864,7 +864,10 @@ class ServerBase:
             if config.register or config.update_all or config.update_psu:
                 self.power = PowerSupply(server=self)
                 self.power.create_or_update_power_supply()
-                self.power.report_power_consumption()
+                try:
+                    self.power.report_power_consumption()
+                except Exception as e:
+                    logging.warning("Power consumption reporting failed: %s", e)
             # update virtualization cluster and virtual machines
             # Auto-detect Proxmox: assign to cluster from corosync.conf
             # without requiring config.virtual.hypervisor to be set.
@@ -958,7 +961,7 @@ class ServerBase:
         # Transition device to "active" on successful agent sync.
         # Only transition from inventory/staged/offline — never override
         # manual statuses like failed or decommissioning.
-        _ACTIVATABLE_STATUSES = {"inventory", "staged", "planned", "offline"}
+        _ACTIVATABLE_STATUSES = {"inventory", "staged", "planned", "offline", "provisioning"}
         current_status = getattr(server, "status", None)
         # pynetbox returns status as a Record with .value attribute
         current_status_value = (
