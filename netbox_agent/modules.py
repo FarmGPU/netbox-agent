@@ -1319,6 +1319,7 @@ class ModuleManager:
         # --- Pass 2: place new/remote items into empty bays ---
         # Build list of empty bays (not occupied by any module)
         empty_bays = [b for b in bays if b.id not in occupied_bay_ids]
+        _serialless_adopted_bays = set()  # Track bays adopted by serialless items
 
         for item in needs_placement:
             serial = item.get("serial")
@@ -1372,35 +1373,54 @@ class ModuleManager:
                 )
 
             else:
-                # --- No serial (e.g., CPUs): positional matching ---
-                # For serialless items, use first available bay (occupied or empty)
-                bay = bays[local_items.index(item)] if local_items.index(item) < len(bays) else None
-                if not bay:
+                # --- No serial (e.g., CPUs, GPUs): positional matching ---
+                # Find a bay that either has a module we can adopt or is empty.
+                # First try to adopt existing modules in order, then create in empty bays.
+                target_bay = None
+
+                # Try occupied bays first (adopt existing modules)
+                for bay in bays:
+                    if bay.id in occupied_bay_ids and bay.id not in _serialless_adopted_bays:
+                        modules_in_bay = list(_api_retry(nb.dcim.modules.filter, module_bay_id=bay.id))
+                        if modules_in_bay:
+                            mod = modules_in_bay[0]
+                            matched_module_ids.add(mod.id)
+                            _serialless_adopted_bays.add(bay.id)
+                            # Update module type if changed
+                            mod_mt_id = None
+                            if mod.module_type:
+                                mod_mt_id = mod.module_type.id if hasattr(mod.module_type, "id") else mod.module_type
+                            if mod_mt_id != module_type.id:
+                                mod.module_type = module_type.id
+                                _api_retry(mod.save)
+                                logger.info("Updated module type at %s on %s", bay.name, self.device.name)
+                            target_bay = bay
+                            break
+
+                if target_bay:
                     continue
-                modules_in_bay = list(_api_retry(nb.dcim.modules.filter, module_bay_id=bay.id))
-                if modules_in_bay:
-                    mod = modules_in_bay[0]
-                    matched_module_ids.add(mod.id)
-                    # Update module type if changed
-                    mod_mt_id = None
-                    if mod.module_type:
-                        mod_mt_id = mod.module_type.id if hasattr(mod.module_type, "id") else mod.module_type
-                    if mod_mt_id != module_type.id:
-                        mod.module_type = module_type.id
-                        _api_retry(mod.save)
-                        logger.info("Updated module type at %s on %s", bay.name, self.device.name)
-                else:
+
+                # No existing module to adopt — create in an empty bay
+                if empty_bays:
+                    target_bay = empty_bays.pop(0)
                     new_mod = _api_retry(nb.dcim.modules.create, {
                         "device": self.device.id,
-                        "module_bay": bay.id,
+                        "module_bay": target_bay.id,
                         "module_type": module_type.id,
                         "status": "active",
                         "custom_fields": self._default_module_custom_fields(),
                     })
                     matched_module_ids.add(new_mod.id)
+                    occupied_bay_ids.add(target_bay.id)
+                    _serialless_adopted_bays.add(target_bay.id)
                     logger.info(
                         "Created module %s (no serial) on %s bay=%s",
-                        item["product"], self.device.name, bay.name,
+                        item["product"], self.device.name, target_bay.name,
+                    )
+                else:
+                    logger.warning(
+                        "No bay available for serialless %s on %s — skipping",
+                        item.get("product", "?"), self.device.name,
                     )
 
         # Step 3: Move unmatched existing modules to spare (hardware removed)

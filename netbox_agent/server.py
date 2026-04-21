@@ -863,7 +863,10 @@ class ServerBase:
             # update psu
             if config.register or config.update_all or config.update_psu:
                 self.power = PowerSupply(server=self)
-                self.power.create_or_update_power_supply()
+                try:
+                    self.power.create_or_update_power_supply()
+                except Exception as e:
+                    logging.warning("PSU sync failed: %s", e)
                 try:
                     self.power.report_power_consumption()
                 except Exception as e:

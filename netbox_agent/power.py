@@ -80,6 +80,12 @@ class PowerSupply:
 
         for psu in psus:
             if psu["name"] not in [x.name for x in nb_psus]:
+                if not psu.get("maximum_draw") or psu["maximum_draw"] <= 0:
+                    logging.warning(
+                        "Skipping PSU '%s' — no wattage data (BMC does not expose FRU details)",
+                        psu["name"],
+                    )
+                    continue
                 logging.info("Creating PSU {name} ({description}), {maximum_draw}W".format(**psu))
                 nb_psu = nb.dcim.power_ports.create(**psu)
 
