@@ -100,6 +100,11 @@ def run(config):
 
 
 def main():
+    # Handle --version before config parsing (which requires a config file)
+    if "--version" in sys.argv or "-V" in sys.argv:
+        from netbox_agent import __version__
+        print(f"netbox-agent {__version__}")
+        return 0
     return run(config)
 
 
