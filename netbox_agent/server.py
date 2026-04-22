@@ -11,8 +11,6 @@ import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
 from netbox_agent.dependencies import missing_deps_string
-from netbox_agent.hypervisor import Hypervisor
-from netbox_agent.inventory import Inventory
 from netbox_agent.location import Datacenter, Rack, Tenant
 from netbox_agent.misc import (
     create_netbox_tags,
@@ -840,19 +838,9 @@ class ServerBase:
             self.network = ServerNetwork(server=self)
             self.network.create_or_update_netbox_network_cards()
 
-        # Defaults for variables used later (expansion slot path)
-        update_inventory = False
-
         # When network_only, skip all hardware sync
         if not network_only:
-            update_inventory = config.inventory and (
-                config.register or config.update_all or config.update_inventory
-            )
-            # update inventory if feature is enabled (legacy Inventory Items)
-            if update_inventory:
-                self.inventory = Inventory(server=self)
-                self.inventory.create_or_update()
-            # update modules if feature is enabled (new Modules API)
+            # update modules if feature is enabled (Modules API)
             update_modules = getattr(config, "modules", False) and (
                 config.register or config.update_all or getattr(config, "update_modules", False)
             )
@@ -871,48 +859,12 @@ class ServerBase:
                     self.power.report_power_consumption()
                 except Exception as e:
                     logging.warning("Power consumption reporting failed: %s", e)
-            # update virtualization cluster and virtual machines
-            # Auto-detect Proxmox: assign to cluster from corosync.conf
-            # without requiring config.virtual.hypervisor to be set.
-            if self._is_proxmox_host() and not config.virtual.hypervisor:
-                cluster_name = self._read_proxmox_cluster_name()
-                if cluster_name:
-                    cluster = nb.virtualization.clusters.get(name=cluster_name)
-                    if cluster:
-                        nb_server = self.get_netbox_server()
-                        if nb_server and getattr(nb_server, 'cluster', None) != cluster:
-                            nb_server.cluster = cluster.id
-                            nb_server.save()
-                            logging.info(
-                                "Auto-assigned Proxmox host '%s' to cluster '%s'",
-                                nb_server.name, cluster_name,
-                            )
-                    else:
-                        logging.warning(
-                            "Proxmox cluster '%s' not found in NetBox — "
-                            "create it first or set virtual.cluster_name",
-                            cluster_name,
-                        )
-            elif config.virtual.hypervisor and (
-                config.register or config.update_all or config.update_hypervisor
-            ):
-                self.hypervisor = Hypervisor(server=self)
-                self.hypervisor.create_or_update_device_cluster()
-                if config.virtual.list_guests_cmd:
-                    self.hypervisor.create_or_update_device_virtual_machines()
-
         expansion = nb.dcim.devices.get(serial=self.get_expansion_service_tag())
         if self.own_expansion_slot() and config.expansion_as_device:
             logging.debug("Update Server expansion...")
             if not expansion:
                 expansion = self._netbox_create_blade_expansion(chassis, datacenter, tenant, rack)
-
-            # set slot for blade expansion
             self._netbox_set_or_update_blade_expansion_slot(expansion, chassis, datacenter)
-            if update_inventory:
-                # Updates expansion inventory
-                inventory = Inventory(server=self, update_expansion=True)
-                inventory.create_or_update()
         elif self.own_expansion_slot() and expansion:
             expansion.delete()
             expansion = None

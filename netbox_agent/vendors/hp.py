@@ -1,6 +1,5 @@
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.server import ServerBase
-from netbox_agent.inventory import Inventory
 
 
 class HPHost(ServerBase):
@@ -112,12 +111,6 @@ class HPHost(ServerBase):
         Indicates if the device hosts a drive expansion card based
         on raid card attributes.
         """
-        # Uses already parsed inventory if available
-        # parses it otherwise
-        inventory = getattr(self, "inventory", None)
-        if inventory is None:
-            inventory = Inventory(self)
-        for raid_card in inventory.get_raid_cards():
-            if self.is_blade() and raid_card.is_external():
-                return True
+        # Legacy: detected HP blade expansion via RAID card inventory.
+        # Inventory module removed — expansion detection disabled.
         return False
