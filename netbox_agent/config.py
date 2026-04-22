@@ -224,8 +224,9 @@ def get_config():
         "--sync-cadence",
         type=int,
         default=86400,
-        help="Expected sync interval in seconds (should match systemd timer OnUnitActiveSec). "
-             "Reported to NetBox for status-manager staleness detection.",
+        help="Expected sync interval in seconds. Should match the SHORTEST systemd timer "
+             "(e.g., 14400 for 4-hour network sync, even if full sync is daily). "
+             "This is the heartbeat rate — status-manager marks the device stale at 1.5x this value.",
     )
 
     options = p.parse_args()
