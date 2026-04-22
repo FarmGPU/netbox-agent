@@ -954,8 +954,13 @@ class ServerBase:
         if bmc_mac:
             local_cf["bmc_mac_address"] = bmc_mac
 
-        # Always update last_agent_sync timestamp on successful sync
+        # Always update last_agent_sync timestamp and agent version on successful sync
         local_cf["last_agent_sync"] = datetime.now(timezone.utc).isoformat()
+        try:
+            from netbox_agent import __version__
+            local_cf["agent_version"] = __version__
+        except Exception:
+            pass
 
         if server.custom_fields != local_cf:
             server.custom_fields = local_cf
