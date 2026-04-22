@@ -220,6 +220,13 @@ def get_config():
         default="/var/lib/netbox-agent-test",
         help="Directory for state file (diff-based sync)",
     )
+    p.add_argument(
+        "--sync-cadence",
+        type=int,
+        default=86400,
+        help="Expected sync interval in seconds (should match systemd timer OnUnitActiveSec). "
+             "Reported to NetBox for status-manager staleness detection.",
+    )
 
     options = p.parse_args()
     return options

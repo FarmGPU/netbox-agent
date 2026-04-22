@@ -913,9 +913,9 @@ class ServerBase:
             local_cf["agent_version"] = __version__
         except Exception:
             pass
-        # Report sync cadence (seconds). The agent runs via systemd timer —
-        # default is daily (86400s). Override via config if running more frequently.
-        local_cf["agent_cadence"] = getattr(config, "agent_cadence", 86400)
+        # Report sync cadence (seconds) — must match systemd timer interval.
+        # Set via config: sync_cadence (CLI --sync-cadence or YAML sync_cadence).
+        local_cf["agent_cadence"] = getattr(config, "sync_cadence", 86400)
 
         if server.custom_fields != local_cf:
             server.custom_fields = local_cf
