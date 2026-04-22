@@ -1,4 +1,11 @@
 import sys
+
+# Handle --version before any imports that trigger argparse
+if "--version" in sys.argv or "-V" in sys.argv:
+    from netbox_agent import __version__
+    print(f"netbox-agent {__version__}")
+    sys.exit(0)
+
 from packaging import version
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
@@ -100,11 +107,6 @@ def run(config):
 
 
 def main():
-    # Handle --version before config parsing (which requires a config file)
-    if "--version" in sys.argv or "-V" in sys.argv:
-        from netbox_agent import __version__
-        print(f"netbox-agent {__version__}")
-        return 0
     return run(config)
 
 
