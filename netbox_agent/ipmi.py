@@ -1,81 +1,109 @@
+"""
+IPMI LAN channel parser.
+
+Probes multiple BMC channels (1, 2, 8) and normalizes the OOB IP to /32.
+Returns interface dict with MAC even when IP is unassigned (0.0.0.0) so
+the IPMI interface is visible in NetBox.  Returns empty dict only when
+ipmitool is missing or no channel responds with a valid MAC.
+"""
+
 import logging
 import subprocess
+from shutil import which
 
-from netaddr import IPNetwork
+logger = logging.getLogger("netbox_agent.ipmi")
+
+# Channels to probe in order — most BMCs use 1, some use 2 or 8
+_CHANNELS = [1, 2, 8]
 
 
 class IPMI:
-    """
-    Parse IPMI output
-    ie:
-
-    Set in Progress         : Set Complete
-    Auth Type Support       :
-    Auth Type Enable        : Callback :
-                            : User     :
-                            : Operator :
-                            : Admin    :
-                            : OEM      :
-    IP Address Source       : DHCP Address
-    IP Address              : 10.192.2.1
-    Subnet Mask             : 255.255.240.0
-    MAC Address             : 98:f2:b3:f0:ee:1e
-    SNMP Community String   :
-    BMC ARP Control         : ARP Responses Enabled, Gratuitous ARP Disabled
-    Default Gateway IP      : 10.192.2.254
-    802.1q VLAN ID          : Disabled
-    802.1q VLAN Priority    : 0
-    RMCP+ Cipher Suites     : 0,1,2,3
-    Cipher Suite Priv Max   : XuuaXXXXXXXXXXX
-                            :     X=Cipher Suite Unused
-                            :     c=CALLBACK
-                            :     u=USER
-                            :     o=OPERATOR
-                            :     a=ADMIN
-                            :     O=OEM
-    Bad Password Threshold  : Not Available
-    """
+    """Parse IPMI LAN configuration from ipmitool."""
 
     def __init__(self):
-        self.ret, self.output = subprocess.getstatusoutput("ipmitool lan print")
-        if self.ret != 0:
-            logging.warning("IPMI command failed: {}".format(self.output))
+        self.output = ""
+        self.channel = None
+
+        if not which("ipmitool"):
+            logger.info("ipmitool not found — IPMI data unavailable")
+            return
+
+        for ch in _CHANNELS:
+            ret, output = subprocess.getstatusoutput(
+                f"ipmitool lan print {ch}"
+            )
+            if ret != 0:
+                continue
+
+            # Accept channel if it has a valid MAC (IP may be 0.0.0.0)
+            mac = self._extract_field(output, "MAC Address")
+            if mac and mac != "00:00:00:00:00:00":
+                self.output = output
+                self.channel = ch
+                ip = self._extract_field(output, "IP Address") or "0.0.0.0"
+                logger.debug(
+                    "IPMI: valid response on channel %d (MAC=%s, IP=%s)", ch, mac, ip
+                )
+                break
+        else:
+            logger.warning("IPMI: no valid response on channels %s", _CHANNELS)
 
     def parse(self):
-        _ipmi = {}
+        """Parse IPMI output into a network interface dict.
 
+        Returns interface dict with MAC always.  The ``ip`` list is empty
+        when the BMC has no assigned IP (0.0.0.0), so the IPMI interface
+        still appears in NetBox with its MAC for visibility.
+        """
+        if not self.output:
+            return {}
+
+        fields = {}
         for line in self.output.splitlines():
             key = line.split(":")[0].strip()
-            if key not in ["802.1q VLAN ID", "IP Address", "Subnet Mask", "MAC Address"]:
-                continue
-            value = ":".join(line.split(":")[1:]).strip()
-            _ipmi[key] = value
+            if key in ("802.1q VLAN ID", "IP Address", "Subnet Mask", "MAC Address"):
+                value = ":".join(line.split(":")[1:]).strip()
+                fields[key] = value
 
-        ret = {}
-        ret["name"] = "IPMI"
-        ret["mtu"] = 1500
-        ret["bonding"] = False
         try:
-            ret["mac"] = _ipmi.get("MAC Address")
-            if ret["mac"]:
-                ret["mac"] = ret["mac"].upper()
-            # VLAN ID is optional - some BMCs (like Supermicro) don't report it
-            vlan_id = _ipmi.get("802.1q VLAN ID")
-            if vlan_id and vlan_id != "Disabled":
-                ret["vlan"] = int(vlan_id)
-            else:
-                ret["vlan"] = None
-            ip = _ipmi.get("IP Address")
-            netmask = _ipmi.get("Subnet Mask")
-            if not ip or not netmask or not ret["mac"]:
-                logging.error("IPMI decoding failed: missing required fields (IP=%s, Netmask=%s, MAC=%s)", 
-                              ip, netmask, ret["mac"])
-                return {}
-        except (KeyError, ValueError) as e:
-            logging.error("IPMI decoding failed: %s", e)
+            mac = fields["MAC Address"]
+            if mac:
+                mac = mac.upper()
+            vlan_raw = fields.get("802.1q VLAN ID", "Disabled")
+            vlan = int(vlan_raw) if vlan_raw != "Disabled" else None
+        except KeyError as e:
+            logger.error("IPMI decoding failed, missing: %s", e.args[0])
             return {}
-        address = str(IPNetwork("{}/{}".format(ip, netmask)))
 
-        ret["ip"] = [address]
-        ret["ipmi"] = True
-        return ret
+        # Build IP list — empty when BMC has no assigned IP or IP is filtered
+        ip = fields.get("IP Address", "")
+        ip_list = []
+        if ip and ip != "0.0.0.0":
+            import re
+            from netbox_agent.config import config
+            ignore_pattern = getattr(config.network, "ignore_ips", None) if hasattr(config, "network") else None
+            if ignore_pattern and re.match(ignore_pattern, ip):
+                logger.info("IPMI: MAC=%s IP=%s filtered by ignore_ips — interface created without IP", mac, ip)
+            else:
+                ip_list = [f"{ip}/32"]
+        else:
+            logger.info("IPMI: MAC=%s but IP unassigned (0.0.0.0) — interface created without IP", mac)
+
+        return {
+            "name": "IPMI",
+            "mac": mac,
+            "ip": ip_list,
+            "vlan": vlan,
+            "mtu": 1500,
+            "bonding": False,
+            "ipmi": True,
+        }
+
+    @staticmethod
+    def _extract_field(output, field_name):
+        """Extract a single field value from ipmitool output."""
+        for line in output.splitlines():
+            key = line.split(":")[0].strip()
+            if key == field_name:
+                return ":".join(line.split(":")[1:]).strip()
+        return None

@@ -80,6 +80,12 @@ class PowerSupply:
 
         for psu in psus:
             if psu["name"] not in [x.name for x in nb_psus]:
+                if not psu.get("maximum_draw") or psu["maximum_draw"] <= 0:
+                    logging.warning(
+                        "Skipping PSU '%s' — no wattage data (BMC does not expose FRU details)",
+                        psu["name"],
+                    )
+                    continue
                 logging.info("Creating PSU {name} ({description}), {maximum_draw}W".format(**psu))
                 try:
                     nb_psu = nb.dcim.power_ports.create(**psu)
@@ -94,7 +100,7 @@ class PowerSupply:
         except NotImplementedError:
             logging.error("Cannot report power consumption for this vendor")
             return False
-        nb_psus = self.get_netbox_power_supply()
+        nb_psus = list(self.get_netbox_power_supply())
 
         if not len(nb_psus) or not len(psu_cons):
             return False

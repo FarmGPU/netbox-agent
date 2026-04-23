@@ -1,12 +1,12 @@
 netbox:
- url: 'http://netbox.internal.company.com'
- token: supersecrettoken
- # uncomment to disable ssl verification
- # ssl_verify: false
+  url: 'http://netbox.internal.company.com'
+  token: supersecrettoken
+  # uncomment to disable ssl verification
+  # ssl_verify: false
 
 network:
   ignore_interfaces: "(dummy.*|docker.*)"
-  ignore_ips: (127\.0\.0\..*)
+  ignore_ips: "(127\\.0\\.0\\..*)"
   # enable auto-cabling
   lldp: true
 
@@ -14,40 +14,72 @@ network:
 # You can use these to change the roles.
 #
 #device:
-# chassis_role: "Server Chassis"
-# blade_role: "Blade"
-# server_role: "Server"
-# tags: server, blade, ,just a comma,delimited,list
-# custom_fields: field1=value1,field2=value2
-#
+#  chassis_role: "Server Chassis"
+#  blade_role: "Blade"
+#  server_role: "Server"
+#  tags: server, blade, ,just a comma,delimited,list
+#  custom_fields: field1=value1,field2=value2
+#  default_owner: "FarmGPU"
+#  asset_tag_cmd: "dmidecode -s chassis-asset-tag"
+
 #
 # Use this to set the tenant
 #
 #tenant:
-# driver: "file:/tmp/tenant"
-# regex: "(.*)"
+#  driver: "file:/tmp/tenant"
+#  regex: "(.*)"
 
+#
+# Datacenter (Site) location - REQUIRED
+# The driver command must output a string matching the regex.
+# The named group 'datacenter' must match the NetBox Site slug.
+#
+# Option 1: Static site assignment (single-site deployments)
 datacenter_location:
- driver: "cmd:cat /etc/qualification | tr [A-Z] [a-z]"
- regex: "datacenter: (?P<datacenter>[A-Za-z0-9]+)"
-# driver: 'cmd:lldpctl'
-# regex: 'SysName: .*\.([A-Za-z0-9]+)'
-#
-# driver: "file:/tmp/datacenter"
-# regex: "(.*)"
+  driver: "cmd:echo datacenter: smf01"
+  regex: "datacenter: (?P<datacenter>[A-Za-z0-9]+)"
+# Option 2: Read from a per-host file (multi-site deployments)
+#   Create /etc/qualification with content like "datacenter: smf01"
+#datacenter_location:
+#  driver: "cmd:cat /etc/qualification | tr [A-Z] [a-z]"
+#  regex: "datacenter: (?P<datacenter>[A-Za-z0-9]+)"
+# Option 3: Extract from LLDP switch name
+#datacenter_location:
+#  driver: "cmd:lldpctl"
+#  regex: "SysName: .*\\.([A-Za-z0-9]+)"
 
-rack_location:
-# driver: 'cmd:lldpctl'
-# match SysName: sw-dist-a1.dc42
-# regex: 'SysName:[ ]+[A-Za-z]+-[A-Za-z]+-([A-Za-z0-9]+)'
-#
-# driver: "file:/tmp/datacenter"
-# regex: "(.*)"
+#rack_location:
+#  driver: "cmd:lldpctl"
+#  # match SysName: sw-dist-a1.dc42
+#  regex: "SysName:[ ]+[A-Za-z]+-[A-Za-z]+-([A-Za-z0-9]+)"
 
 # Some servers dont report the slot, since most people put it in the hostname
 # here's a way to extract it and maintain correct slot location in Netbox
-# slot_location:
-#   driver: 'cmd:hostname'
-#   regex: '.*-(\d+)'
+#slot_location:
+#  driver: "cmd:hostname"
+#  regex: ".*-(\\d+)"
 
 inventory: true
+
+#
+# Module-based inventory (new Modules API, replaces legacy inventory items)
+# Can coexist with inventory: true during migration transition
+#
+# modules: true
+# update_modules: true
+
+#
+# Spare inventory device name for re-parenting modules when hardware is removed
+#
+# spare_device_name: "SPARE-INVENTORY"
+
+#
+# ARP neighbor reporting (sends discovered MAC→IP pairs to bmc-api)
+# Requires bmc-api with reconciler enabled
+#
+#arp_report:
+#  enabled: true
+#  bmc_api_url: "http://10.100.248.18:8100"
+#  bmc_api_key: "sk-operator-def456"
+#  interfaces: ""           # empty = scan all non-ignored interfaces
+#  scan_timeout: 30         # seconds per interface for arp-scan

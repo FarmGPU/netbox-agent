@@ -4,6 +4,7 @@ from netbox_agent.logging import logging
 from slugify import slugify
 from shutil import which
 import distro
+import logging
 import subprocess
 import socket
 import re
@@ -21,37 +22,44 @@ def get_device_role(role):
     return device_role
 
 
-def get_device_type(type, manufacturer=None):
-    device_type = nb.dcim.device_types.get(model=type)
-    if device_type is None:
-        if manufacturer is None:
-            raise Exception('DeviceType "{}" does not exist, please create it'.format(type))
-        
-        # Auto-create the device type
-        logging.info("Creating missing device type {type} for manufacturer {manufacturer}".format(
-            type=type, manufacturer=manufacturer
-        ))
-        
-        # Find or create the manufacturer
-        nb_manufacturer = nb.dcim.manufacturers.get(name=manufacturer)
-        if not nb_manufacturer:
-            logging.info("Creating missing manufacturer {name}".format(name=manufacturer))
-            nb_manufacturer = nb.dcim.manufacturers.create(
-                name=manufacturer,
-                slug=slugify(manufacturer),
-            )
-        
-        # Create the device type
-        device_type = nb.dcim.device_types.create(
-            model=type,
-            manufacturer=nb_manufacturer.id,
-            slug=slugify(type),
+def get_or_create_manufacturer(name):
+    """Get or create a manufacturer in NetBox."""
+    if not name:
+        name = "Unknown"
+    manufacturer = nb.dcim.manufacturers.get(name=name)
+    if manufacturer is None:
+        manufacturer = nb.dcim.manufacturers.get(slug=slugify(name))
+    if manufacturer is None:
+        logging.info('Auto-creating manufacturer "%s"', name)
+        manufacturer = nb.dcim.manufacturers.create(
+            name=name,
+            slug=slugify(name),
         )
-        
-        logging.info("Created device type {type} for manufacturer {manufacturer}".format(
-            type=type, manufacturer=manufacturer
-        ))
-    
+    return manufacturer
+
+
+def get_device_type(model, manufacturer=None):
+    """Get or auto-create a device type in NetBox.
+
+    If the device type doesn't exist and a manufacturer name is provided,
+    both the manufacturer and device type are created automatically.
+    """
+    device_type = nb.dcim.device_types.get(model=model)
+    if device_type is None and manufacturer:
+        mfr = get_or_create_manufacturer(manufacturer)
+        logging.info(
+            'Auto-creating DeviceType "%s" (manufacturer: %s)', model, manufacturer
+        )
+        device_type = nb.dcim.device_types.create(
+            model=model,
+            slug=slugify(model),
+            manufacturer=mfr.id,
+        )
+    if device_type is None:
+        raise Exception(
+            'DeviceType "{}" does not exist and no manufacturer provided'
+            " for auto-creation".format(model)
+        )
     return device_type
 
 

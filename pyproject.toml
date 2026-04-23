@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-agent"
-version = "1.1.0"
+version = "2.0.0"
 description = "NetBox agent for server"
 authors = [
     {name = "Solvik Blum", email = "solvik@solvik.fr"},
@@ -24,14 +24,14 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-    "pynetbox",
-    "netaddr",
-    "netifaces2",
-    "pyyaml",
-    "jsonargparse",
-    "python-slugify",
-    "packaging",
-    "distro",
+    "pynetbox>=7.6.0",
+    "netaddr==1.3.0",
+    "netifaces2==0.0.22",
+    "pyyaml==6.0.2",
+    "jsonargparse==4.36.0",
+    "python-slugify==8.0.4",
+    "packaging==24.2",
+    "distro==1.9.0",
 ]
 
 [project.optional-dependencies]

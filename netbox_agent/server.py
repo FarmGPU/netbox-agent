@@ -1,23 +1,34 @@
+import json
+import os
+import re
+import subprocess
+import logging
+import socket
+import sys
+from datetime import datetime, timezone
+
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
-from netbox_agent.hypervisor import Hypervisor
-from netbox_agent.inventory import Inventory
-from netbox_agent.ipmi import IPMI
+from netbox_agent.dependencies import missing_deps_string
 from netbox_agent.location import Datacenter, Rack, Tenant
 from netbox_agent.misc import (
     create_netbox_tags,
     get_device_role,
     get_device_type,
     get_device_platform,
+    get_or_create_manufacturer,
 )
 from netbox_agent.network import ServerNetwork
 from netbox_agent.power import PowerSupply
 from pprint import pprint
-import subprocess
-import logging
-import socket
-import sys
+
+# Base-36 asset tag validation: 4-char alphanumeric
+_ASSET_TAG_RE = re.compile(r"^[0-9A-Z]{4}$", re.IGNORECASE)
+_ASSET_TAG_PLACEHOLDERS = {
+    "Not Specified", "None", "N/A", "To Be Filled By O.E.M.", "",
+    "Chassis Asset Tag", "Default string", "No Asset Tag",
+}
 
 
 class ServerBase:
@@ -148,6 +159,15 @@ class ServerBase:
             site_id=datacenter.id,
         )
 
+    def get_manufacturer(self):
+        """
+        Return the system manufacturer from dmidecode info (e.g. 'Supermicro').
+        """
+        try:
+            return self.system[0]["Manufacturer"].strip()
+        except (IndexError, KeyError):
+            return None
+
     def get_product_name(self):
         """
         Return the Chassis Name from dmidecode info
@@ -212,7 +232,7 @@ class ServerBase:
         raise NotImplementedError
 
     def _netbox_create_chassis(self, datacenter, tenant, rack):
-        device_type = get_device_type(self.get_chassis(), self.manufacturer)
+        device_type = get_device_type(self.get_chassis(), manufacturer=self.get_manufacturer())
         device_role = get_device_role(config.device.chassis_role)
         serial = self.get_chassis_service_tag()
         logging.info("Creating chassis blade (serial: {serial})".format(serial=serial))
@@ -224,6 +244,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
             custom_fields=self.custom_fields,
         )
@@ -231,7 +252,7 @@ class ServerBase:
 
     def _netbox_create_blade(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_product_name(), self.manufacturer)
+        device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
         serial = self.get_service_tag()
         hostname = self.get_hostname()
         logging.info(
@@ -248,6 +269,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
             custom_fields=self.custom_fields,
         )
@@ -255,7 +277,7 @@ class ServerBase:
 
     def _netbox_create_blade_expansion(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_expansion_product(), self.manufacturer)
+        device_type = get_device_type(self.get_expansion_product(), manufacturer=self.get_manufacturer())
         serial = self.get_expansion_service_tag()
         hostname = self.get_hostname() + " expansion"
         logging.info(
@@ -272,6 +294,7 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
         )
         return new_blade
@@ -287,9 +310,218 @@ class ServerBase:
                 server.serial = serial
                 server.save()
 
+    # Roles that are auto-assigned and can be corrected by hardware detection.
+    # Manually-set roles (Firewall, JBOF, Hypervisor, etc.) are never touched.
+    _AUTO_ASSIGNABLE_ROLES = {"Server", "GPU Server", "CPU Server", "Storage Server"}
+
+    @staticmethod
+    def _is_proxmox_host() -> bool:
+        """Detect if this machine is a Proxmox VE hypervisor node."""
+        return os.path.isdir("/etc/pve")
+
+    @staticmethod
+    def _read_proxmox_cluster_name() -> str | None:
+        """Read the Proxmox cluster name from corosync.conf.
+
+        Returns the cluster_name from the totem section, or None if
+        this is a standalone (non-clustered) Proxmox node.
+        """
+        conf = "/etc/pve/corosync.conf"
+        if not os.path.isfile(conf):
+            return None
+        try:
+            with open(conf) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("cluster_name:"):
+                        return line.split(":", 1)[1].strip()
+        except OSError:
+            logging.warning("Could not read %s", conf)
+        return None
+
+    def _refine_role(self, server):
+        """Assign or correct server role based on hardware detection.
+
+        Runs on every sync to ensure the role stays accurate as hardware
+        changes (GPUs added/removed, disks added/removed).
+
+        Only modifies roles in _AUTO_ASSIGNABLE_ROLES. Manually-set roles
+        like Firewall, JBOF, Hypervisor, etc. are never touched.
+        """
+        current_role = server.role
+        if not current_role:
+            return
+
+        role_name = current_role.name if hasattr(current_role, 'name') else str(current_role)
+        if role_name not in self._AUTO_ASSIGNABLE_ROLES:
+            return  # Manually set role — don't touch
+
+        # Proxmox hosts should be Hypervisors, not Storage/CPU servers
+        if self._is_proxmox_host():
+            new_role_name = "Hypervisor"
+        else:
+            # Detect hardware to determine refined role
+            new_role_name = self._detect_server_type()
+
+        if new_role_name and new_role_name != "Server":
+            role = nb.dcim.device_roles.get(name=new_role_name)
+            if role:
+                old_role = role_name
+                server.role = role.id
+                server.save()
+                logging.info(
+                    "Refined role for '%s': %s → %s",
+                    server.name, old_role, new_role_name,
+                )
+            else:
+                logging.warning(
+                    "Role '%s' not found in NetBox — skipping refinement for '%s'",
+                    new_role_name, server.name,
+                )
+
+    # Vendors/keywords for filtering onboard VGA from real GPUs
+    _SKIP_GPU_VENDORS = {"aspeed technology, inc.", "matrox electronics systems ltd."}
+    _SKIP_GPU_KEYWORDS = {"aspeed", "matrox", "vga compatible"}
+
+    # Minimum discrete GPUs to classify as "GPU Server".
+    # Filters out machines with 1-2 GPUs used for display/monitoring.
+    # Most GPU servers have 3+ (4x RTX 4090, 8x H100, 8x B200, etc.)
+    _MIN_GPU_COUNT = 3
+
+    # Minimum physical disk count to classify as "Storage Server".
+    # Standard servers have 1-4 disks (OS + data). Storage servers
+    # have 8+ (NVMe shelves, JBOF-connected, Ceph/Weka nodes).
+    _MIN_STORAGE_DISK_COUNT = 6
+
+    def _detect_server_type(self) -> str:
+        """Determine server type from hardware.
+
+        Thresholds:
+          GPU Server:     ≥ 3 discrete GPUs (NVIDIA, AMD, Intel Gaudi)
+          Storage Server: ≥ 6 physical disks
+          CPU Server:     everything else
+
+        GPU detection filters out onboard VGA (Aspeed, Matrox) and
+        known non-GPU vendors. Only counts discrete GPUs from NVIDIA,
+        AMD, or Intel (Gaudi).
+
+        Storage detection counts physical block devices excluding
+        virtual devices (loop, ram, zram, device-mapper).
+
+        Returns: 'GPU Server', 'CPU Server', or 'Storage Server'.
+        """
+        # --- Check for discrete GPUs ---
+        gpu_count = 0
+        try:
+            from netbox_agent.lshw import LSHW
+            lshw = LSHW()
+            gpus = lshw.get_hw_linux("gpu")
+
+            # Known GPU vendors (discrete GPUs, not onboard VGA)
+            _GPU_VENDORS = {"nvidia", "amd", "ati", "habana", "intel"}
+            _SKIP_VENDORS = {"aspeed", "matrox"}
+
+            for gpu in gpus:
+                vendor = gpu.get("vendor", "").lower()
+                product = gpu.get("product", "").lower()
+
+                # Skip known onboard VGA
+                if any(sv in vendor for sv in _SKIP_VENDORS):
+                    continue
+                if any(kw in product for kw in ("aspeed", "matrox")):
+                    continue
+
+                # Only count if vendor is a known GPU maker
+                is_known_gpu = any(gv in vendor for gv in _GPU_VENDORS)
+                if is_known_gpu:
+                    gpu_count += 1
+        except Exception as e:
+            logging.warning("GPU detection failed during role refinement: %s", e)
+
+        if gpu_count >= self._MIN_GPU_COUNT:
+            return "GPU Server"
+
+        # --- Check for bulk storage ---
+        disk_count = 0
+        try:
+            output = subprocess.check_output(
+                ["lsblk", "-J", "-b", "-d", "-o", "NAME,TYPE,SIZE"],
+                encoding="utf-8", timeout=10,
+            )
+            data = json.loads(output)
+            disks = [d for d in data.get("blockdevices", [])
+                     if d.get("type") == "disk"
+                     and not d.get("name", "").startswith(
+                         ("loop", "ram", "zram", "dm-", "md")
+                     )]
+            disk_count = len(disks)
+        except Exception as e:
+            logging.warning("Storage detection failed during role refinement: %s", e)
+
+        if disk_count >= self._MIN_STORAGE_DISK_COUNT:
+            return "Storage Server"
+
+        # Default: CPU Server
+        return "CPU Server"
+
+    # --- Tenant auto-detection from running services ---
+
+    # Services whose presence indicates RunPod tenant
+    _RUNPOD_SERVICES = ("runpod", "safe_runpod", "runpod-worker")
+    # MooseFS services indicate dedicated storage for RunPod
+    _MOOSEFS_SERVICES = (
+        "moosefs-chunkserver", "moosefs-master", "moosefs-metalogger",
+        "mfschunkserver", "mfsmaster",
+    )
+
+    def _detect_tenant(self) -> str:
+        """Detect tenant from running systemd services.
+
+        Returns tenant slug:
+          - 'runpod' if any RunPod or MooseFS service is active
+          - 'farmgpu' otherwise
+        """
+        for svc in self._RUNPOD_SERVICES + self._MOOSEFS_SERVICES:
+            try:
+                result = subprocess.run(
+                    ["systemctl", "is-active", svc],
+                    capture_output=True, encoding="utf-8", timeout=5,
+                )
+                if result.stdout.strip() == "active":
+                    logging.debug("Tenant detection: service '%s' is active → runpod", svc)
+                    return "runpod"
+            except Exception:
+                pass
+        return "farmgpu"
+
+    def _sync_tenant(self, server):
+        """Sync tenant based on detected running services.
+
+        Updates tenant on every sync cycle so repurposed machines
+        auto-flip between RunPod and FarmGPU.
+        """
+        tenant_slug = self._detect_tenant()
+        nb_tenant = nb.tenancy.tenants.get(slug=tenant_slug)
+        if not nb_tenant:
+            logging.warning(
+                "Tenant '%s' not found in NetBox — skipping tenant sync for '%s'",
+                tenant_slug, server.name,
+            )
+            return
+
+        current_tenant_id = server.tenant.id if server.tenant else None
+        if current_tenant_id != nb_tenant.id:
+            old_name = server.tenant.name if server.tenant else "(none)"
+            server.tenant = nb_tenant.id
+            server.save()
+            logging.info(
+                "Tenant for '%s': %s → %s",
+                server.name, old_name, nb_tenant.name,
+            )
+
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
-        device_type = get_device_type(self.get_product_name(), self.manufacturer)
+        device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
         if not device_type:
             raise Exception('Chassis "{}" doesn\'t exist'.format(self.get_chassis()))
         serial = self.get_service_tag()
@@ -299,7 +531,26 @@ class ServerBase:
                 serial=serial, hostname=hostname
             )
         )
-        new_server = nb.dcim.devices.create(
+
+        # Build custom fields with defaults for new fields
+        cf = dict(self.custom_fields)
+        default_owner = getattr(config.device, "default_owner", "FarmGPU")
+        cf.setdefault("owner", default_owner)
+        cf.setdefault("environment", "Production")
+        cf.setdefault("record_completeness", "incomplete")
+
+        # Include BMC MAC and chassis serial at creation time
+        bmc_mac = self._get_bmc_mac()
+        if bmc_mac:
+            cf["bmc_mac_address"] = bmc_mac
+        chassis_serial = self._get_chassis_serial()
+        if chassis_serial:
+            cf["chassis_serial"] = chassis_serial
+
+        # Set last_agent_sync at creation time
+        cf["last_agent_sync"] = datetime.now(timezone.utc).isoformat()
+
+        create_kwargs = dict(
             name=hostname,
             serial=serial,
             role=device_role.id,
@@ -308,16 +559,131 @@ class ServerBase:
             site=datacenter.id if datacenter else None,
             tenant=tenant.id if tenant else None,
             rack=rack.id if rack else None,
+            status="active",
             tags=[{"name": x} for x in self.tags],
-            custom_fields=self.custom_fields,
+            custom_fields=cf,
         )
+
+        # Set asset tag if available
+        asset_tag = self.get_asset_tag()
+        if asset_tag:
+            create_kwargs["asset_tag"] = asset_tag
+
+        new_server = nb.dcim.devices.create(**create_kwargs)
         return new_server
 
+    def _ensure_required_custom_fields(self, server, config):
+        """
+        Ensure required custom fields have values on existing devices.
+        NetBox validates ALL required CFs on any PATCH, so we must fill
+        missing ones before any save() call succeeds.
+        """
+        cf = dict(server.custom_fields or {})
+        changed = False
+        default_owner = getattr(config.device, "default_owner", "FarmGPU")
+
+        if not cf.get("owner"):
+            cf["owner"] = default_owner
+            changed = True
+        if not cf.get("environment"):
+            cf["environment"] = "Production"
+            changed = True
+        if not cf.get("record_completeness"):
+            cf["record_completeness"] = "incomplete"
+            changed = True
+
+        if changed:
+            logging.info(
+                "Backfilling required custom fields on '%s': %s",
+                server.name,
+                {k: cf[k] for k in ("owner", "environment", "record_completeness")},
+            )
+            server.custom_fields = cf
+            server.save()
+
+    def get_asset_tag(self):
+        """
+        Read asset tag from config command, IPMI FRU, or DMI chassis.
+        Returns validated Base-36 tag string (4 chars, 0-9/A-Z) or None.
+        """
+        tag = None
+
+        # Source 1: Config command (highest priority)
+        asset_tag_cmd = getattr(config.device, "asset_tag_cmd", None)
+        if asset_tag_cmd:
+            try:
+                tag = subprocess.getoutput(asset_tag_cmd).strip()
+            except Exception:
+                tag = None
+
+        # Source 2: IPMI FRU "Product Asset Tag" (most reliable on Supermicro)
+        if not tag or tag in _ASSET_TAG_PLACEHOLDERS or not _ASSET_TAG_RE.match(tag):
+            try:
+                output = subprocess.check_output(
+                    ["ipmitool", "fru", "print", "0"],
+                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                )
+                for line in output.splitlines():
+                    if "Product Asset Tag" in line and ":" in line:
+                        tag = line.split(":", 1)[1].strip()
+                        break
+            except Exception:
+                pass
+
+        # Source 3: DMI Chassis Asset Tag (fallback)
+        if not tag or tag in _ASSET_TAG_PLACEHOLDERS or not _ASSET_TAG_RE.match(tag):
+            if self.chassis:
+                tag = self.chassis[0].get("Asset Tag", "").strip()
+
+        # Validate: must be exactly 4 alphanumeric chars, not a placeholder
+        if tag and tag not in _ASSET_TAG_PLACEHOLDERS and _ASSET_TAG_RE.match(tag):
+            return tag.upper()
+        return None
+
     def get_netbox_server(self, expansion=False):
-        if expansion is False:
-            return nb.dcim.devices.get(serial=self.get_service_tag())
-        else:
+        """
+        Triple-mode device lookup: asset_tag → serial → BMC MAC.
+
+        BMC API creates device skeletons with BMC MAC + OOB IP.  Some devices
+        (e.g. Gigabyte) have no usable serial and the asset tag may not yet be
+        programmed.  Matching by BMC MAC ensures netbox-agent enriches the
+        existing skeleton rather than creating a duplicate.
+        """
+        if expansion:
             return nb.dcim.devices.get(serial=self.get_expansion_service_tag())
+
+        # Try asset tag first (case-insensitive — BMC may report 101K vs 101k)
+        asset_tag = self.get_asset_tag()
+        if asset_tag:
+            device = nb.dcim.devices.get(asset_tag=asset_tag)
+            if not device:
+                # Try lowercase — BMC API stores lowercase, DMI may report uppercase
+                device = nb.dcim.devices.get(asset_tag=asset_tag.lower())
+            if device:
+                return device
+            logging.debug("No device found with asset_tag=%s, falling back to serial", asset_tag)
+
+        # Fall back to serial
+        serial = self.get_service_tag()
+        if serial:
+            device = nb.dcim.devices.get(serial=serial)
+            if device:
+                return device
+            logging.debug("No device found with serial=%s, falling back to BMC MAC", serial)
+
+        # Fall back to BMC MAC (custom field cf_bmc_mac_address)
+        bmc_mac = self._get_bmc_mac()
+        if bmc_mac:
+            devices = list(nb.dcim.devices.filter(cf_bmc_mac_address=bmc_mac))
+            if devices:
+                logging.info(
+                    "Matched device by BMC MAC %s → %s (id=%s)",
+                    bmc_mac, devices[0].name, devices[0].id,
+                )
+                return devices[0]
+            logging.debug("No device found with bmc_mac=%s", bmc_mac)
+
+        return None
 
     def _netbox_set_or_update_blade_slot(self, server, chassis, datacenter):
         # before everything check if right chassis
@@ -398,7 +764,7 @@ class ServerBase:
         real_device_bay.installed_device = expansion
         real_device_bay.save()
 
-    def netbox_create_or_update(self, config):
+    def netbox_create_or_update(self, config, deps=None, network_only=False, state=None):
         """
         Netbox method to create or update info about our server/blade
 
@@ -410,6 +776,12 @@ class ServerBase:
         * Inventory management
         * PSU management
         * virtualization cluster device
+
+        Args:
+            config: Parsed configuration namespace
+            deps: dict of {tool_name: bool} from dependencies.check_all()
+            network_only: If True, skip hardware sync — only update network
+            state: StateManager instance for diff-based sync
         """
         datacenter = self.get_netbox_datacenter()
         rack = self.get_netbox_rack()
@@ -427,55 +799,91 @@ class ServerBase:
             if not chassis:
                 chassis = self._netbox_create_chassis(datacenter, tenant, rack)
 
-            server = nb.dcim.devices.get(serial=self.get_service_tag())
+            server = self.get_netbox_server()
             if not server:
                 server = self._netbox_create_blade(chassis, datacenter, tenant, rack)
 
             # Set slot for blade
             self._netbox_set_or_update_blade_slot(server, chassis, datacenter)
         else:
-            server = nb.dcim.devices.get(serial=self.get_service_tag())
+            server = self.get_netbox_server()
             if not server:
                 server = self._netbox_create_server(datacenter, tenant, rack)
 
+        # Ensure required custom fields are populated on existing devices.
+        # NetBox validates ALL required CFs on any PATCH, so we must fill
+        # them before saving any field (e.g., asset_tag).
+        self._ensure_required_custom_fields(server, config)
+
+        # Record missing dependencies as a custom field on the device
+        if deps is not None:
+            missing_str = missing_deps_string(deps)
+            cf = dict(server.custom_fields or {})
+            if cf.get("missing_agent_dependencies") != missing_str:
+                cf["missing_agent_dependencies"] = missing_str
+                server.custom_fields = cf
+                server.save()
+                if missing_str:
+                    logging.info("Missing dependencies on '%s': %s", server.name, missing_str)
+                server = nb.dcim.devices.get(server.id)  # re-fetch after save
+
+        # Sync asset tag: only populate if NetBox record has NO asset tag.
+        # BMC API is the authority for asset_tag (programmed via Redfish).
+        # netbox-agent should never overwrite an existing tag — the OS-level
+        # dmidecode value may differ from the Redfish-programmed value on
+        # some platforms (e.g., AST2600 where FRU and Redfish AssetTag diverge).
+        local_asset_tag = self.get_asset_tag()
+        existing_tag = getattr(server, "asset_tag", None)
+        if local_asset_tag and not existing_tag:
+            logging.info(
+                "Setting initial asset_tag on '%s': %s",
+                server.name,
+                local_asset_tag,
+            )
+            server.asset_tag = local_asset_tag
+            server.save()
+        elif local_asset_tag and existing_tag and local_asset_tag != existing_tag:
+            logging.warning(
+                "Asset tag mismatch on '%s': NetBox=%s, local=%s "
+                "(keeping NetBox value — BMC API is authoritative)",
+                server.name,
+                existing_tag,
+                local_asset_tag,
+            )
+
         logging.debug("Updating Server...")
         # check network cards
-        if config.register or config.update_all or config.update_network:
+        if config.register or config.update_all or config.update_network or network_only:
             self.network = ServerNetwork(server=self)
             self.network.create_or_update_netbox_network_cards()
-        update_inventory = config.inventory and (
-            config.register or config.update_all or config.update_inventory
-        )
-        # update inventory if feature is enabled
-        self.inventory = Inventory(server=self)
-        if update_inventory:
-            self.inventory.create_or_update()
-        # update psu
-        if config.register or config.update_all or config.update_psu:
-            self.power = PowerSupply(server=self)
-            self.power.create_or_update_power_supply()
-            self.power.report_power_consumption()
-        # update virtualization cluster and virtual machines
-        if config.virtual.hypervisor and (
-            config.register or config.update_all or config.update_hypervisor
-        ):
-            self.hypervisor = Hypervisor(server=self)
-            self.hypervisor.create_or_update_device_cluster()
-            if config.virtual.list_guests_cmd:
-                self.hypervisor.create_or_update_device_virtual_machines()
 
+        # When network_only, skip all hardware sync
+        if not network_only:
+            # update modules if feature is enabled (Modules API)
+            update_modules = getattr(config, "modules", False) and (
+                config.register or config.update_all or getattr(config, "update_modules", False)
+            )
+            if update_modules:
+                from netbox_agent.modules import ModuleManager
+                self.module_manager = ModuleManager(server=self, config=config)
+                self.module_manager.create_or_update(deps=deps, state=state)
+            # update psu
+            if config.register or config.update_all or config.update_psu:
+                self.power = PowerSupply(server=self)
+                try:
+                    self.power.create_or_update_power_supply()
+                except Exception as e:
+                    logging.warning("PSU sync failed: %s", e)
+                try:
+                    self.power.report_power_consumption()
+                except Exception as e:
+                    logging.warning("Power consumption reporting failed: %s", e)
         expansion = nb.dcim.devices.get(serial=self.get_expansion_service_tag())
         if self.own_expansion_slot() and config.expansion_as_device:
             logging.debug("Update Server expansion...")
             if not expansion:
                 expansion = self._netbox_create_blade_expansion(chassis, datacenter, tenant, rack)
-
-            # set slot for blade expansion
             self._netbox_set_or_update_blade_expansion_slot(expansion, chassis, datacenter)
-            if update_inventory:
-                # Updates expansion inventory
-                inventory = Inventory(server=self, update_expansion=True)
-                inventory.create_or_update()
         elif self.own_expansion_slot() and expansion:
             expansion.delete()
             expansion = None
@@ -485,6 +893,16 @@ class ServerBase:
         # check hostname
         if server.name != self.get_hostname():
             server.name = self.get_hostname()
+            update += 1
+
+        # Sync device serial — system serial only, no fallbacks
+        local_serial = self._get_best_serial() or ""
+        if server.serial != local_serial:
+            logging.info(
+                "Updating serial on '%s': %s -> %s",
+                server.name, server.serial, local_serial or "(empty)",
+            )
+            server.serial = local_serial
             update += 1
 
         server_tags = sorted(set([x.name for x in server.tags]))
@@ -498,8 +916,45 @@ class ServerBase:
                 server.tags = sorted(set(new_tags_ids + server_tags_ids))
             update += 1
 
-        if server.custom_fields != self.custom_fields:
-            server.custom_fields = self.custom_fields
+        # Populate chassis_serial and bmc_mac_address custom fields
+        local_cf = dict(self.custom_fields)
+        chassis_serial = self._get_chassis_serial()
+        if chassis_serial:
+            local_cf["chassis_serial"] = chassis_serial
+        bmc_mac = self._get_bmc_mac()
+        if bmc_mac:
+            local_cf["bmc_mac_address"] = bmc_mac
+
+        # Always update last_agent_sync timestamp, version, and cadence on successful sync
+        local_cf["last_agent_sync"] = datetime.now(timezone.utc).isoformat()
+        try:
+            from netbox_agent import __version__
+            local_cf["agent_version"] = __version__
+        except Exception:
+            pass
+        # Report sync cadence (seconds) — must match systemd timer interval.
+        # Set via config: sync_cadence (CLI --sync-cadence or YAML sync_cadence).
+        local_cf["agent_cadence"] = getattr(config, "sync_cadence", 86400)
+
+        if server.custom_fields != local_cf:
+            server.custom_fields = local_cf
+            update += 1
+
+        # Transition device to "active" on successful agent sync.
+        # Only transition from inventory/staged/offline — never override
+        # manual statuses like failed or decommissioning.
+        _ACTIVATABLE_STATUSES = {"inventory", "staged", "planned", "offline", "provisioning"}
+        current_status = getattr(server, "status", None)
+        # pynetbox returns status as a Record with .value attribute
+        current_status_value = (
+            current_status.value if hasattr(current_status, "value") else current_status
+        )
+        if current_status_value in _ACTIVATABLE_STATUSES:
+            logging.info(
+                "Transitioning device '%s' status: %s → active",
+                server.name, current_status_value,
+            )
+            server.status = "active"
             update += 1
 
         if config.update_all or config.update_location:
@@ -535,6 +990,12 @@ class ServerBase:
         if update:
             server.save()
 
+        # Refine generic "Server" role based on detected hardware
+        self._refine_role(server)
+
+        # Sync tenant based on running services (runpod/moosefs → RunPod, else → FarmGPU)
+        self._sync_tenant(server)
+
         if expansion:
             update = 0
             expansion_name = server.name + " expansion"
@@ -546,54 +1007,186 @@ class ServerBase:
             if update:
                 expansion.save()
 
-        # Handle IPMI/OOB IP setup
-        if config.network.ipmi:
+        # Re-fetch IPs after network updates (IPs may have been added/removed)
+        myips = list(nb.ipam.ip_addresses.filter(device_id=server.id))
+        # Build a set of currently assigned IP IDs for validation
+        assigned_ip_ids = {ip.id for ip in myips}
+
+        # Re-fetch the device to get current oob_ip/primary_ip4 state
+        server = nb.dcim.devices.get(server.id)
+
+        # --- OOB IP (IPMI) assignment --- saved separately to avoid atomic failure ---
+        oob_update = False
+
+        # Clear oob_ip if it points to an IP no longer assigned to this device
+        if server.oob_ip and server.oob_ip.id not in assigned_ip_ids:
+            logging.info(
+                "Clearing stale oob_ip %s (no longer assigned to device)",
+                server.oob_ip,
+            )
+            server.oob_ip = None
+            oob_update = True
+
+        # Set oob_ip to the IPMI interface IP
+        if not oob_update:
+            for ip in myips:
+                if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
+                    server.oob_ip = ip.id
+                    oob_update = True
+                    break
+
+        if oob_update:
             try:
-                ipmi_data = IPMI().parse()
-                if ipmi_data and ipmi_data.get("ip"):
-                    ipmi_ip_addr = ipmi_data["ip"]
-                    logging.info(f"Setting up IPMI with IP: {ipmi_ip_addr}")
-
-                    # Step 1: Find or create IPMI interface
-                    ipmi_interface = nb.dcim.interfaces.get(device_id=server.id, name="IPMI")
-                    if not ipmi_interface:
-                        logging.info(f"Creating IPMI interface on {server.name}")
-                        ipmi_interface = nb.dcim.interfaces.create(
-                            device=server.id,
-                            name="IPMI",
-                            type="other",
-                            mgmt_only=True,
-                        )
-
-                    # Step 2: Find or create IP, assign to IPMI interface
-                    existing_ip = nb.ipam.ip_addresses.get(address=ipmi_ip_addr)
-                    if existing_ip:
-                        if existing_ip.assigned_object_id != ipmi_interface.id:
-                            logging.info(f"Assigning IP {ipmi_ip_addr} to IPMI interface")
-                            existing_ip.assigned_object_type = "dcim.interface"
-                            existing_ip.assigned_object_id = ipmi_interface.id
-                            existing_ip.save()
-                        ip_id = existing_ip.id
-                    else:
-                        logging.info(f"Creating IP {ipmi_ip_addr} for IPMI interface")
-                        new_ip = nb.ipam.ip_addresses.create(
-                            address=ipmi_ip_addr,
-                            status="active",
-                            assigned_object_type="dcim.interface",
-                            assigned_object_id=ipmi_interface.id,
-                        )
-                        ip_id = new_ip.id
-
-                    # Step 3: Set as oob_ip
-                    current_oob_id = server.oob_ip.id if server.oob_ip else None
-                    if current_oob_id != ip_id:
-                        logging.info(f"Setting OOB IP to {ipmi_ip_addr}")
-                        server.oob_ip = ip_id
-                        server.save()
+                server.save()
+                logging.info(
+                    "Saved oob_ip for device %s (id=%s)",
+                    server.name, server.id,
+                )
             except Exception as e:
-                logging.warning(f"Failed to configure IPMI/OOB IP: {e}")
+                logging.error(
+                    "Failed to save oob_ip for device %s (id=%s): %s",
+                    server.name, server.id, e,
+                )
+
+        # --- Primary IPv4 assignment --- saved separately to avoid atomic failure ---
+        # Re-fetch device to get clean state after oob_ip save
+        server = nb.dcim.devices.get(server.id)
+        primary_update = False
+
+        # Clear primary_ip4 if it points to an IP no longer assigned
+        if server.primary_ip4 and server.primary_ip4.id not in assigned_ip_ids:
+            logging.info(
+                "Clearing stale primary_ip4 %s (no longer assigned to device)",
+                server.primary_ip4,
+            )
+            server.primary_ip4 = None
+            primary_update = True
+
+        # Set primary_ip4 to the management IP (default gateway interface)
+        if not server.primary_ip4:
+            mgmt_iface = self._get_default_gateway_interface()
+            if mgmt_iface:
+                for ip in myips:
+                    if (
+                        ip.assigned_object
+                        and ip.assigned_object.display == mgmt_iface
+                        and ip.family
+                        and ip.family.value == 4
+                    ):
+                        server.primary_ip4 = ip.id
+                        primary_update = True
+                        break
+
+        if primary_update:
+            try:
+                server.save()
+                logging.info(
+                    "Saved primary_ip4 for device %s (id=%s)",
+                    server.name, server.id,
+                )
+            except Exception as e:
+                logging.error(
+                    "Failed to save primary_ip4 for device %s (id=%s): %s",
+                    server.name, server.id, e,
+                )
 
         logging.debug("Finished updating Server!")
+
+    # DMI placeholder values that should be treated as "no serial"
+    _DMI_PLACEHOLDERS = {
+        "", "none", "n/a", "na", "not specified", "not available",
+        "not applicable", "to be filled by o.e.m.", "default string",
+        "0123456789", "..................", "system serial number",
+        "chassis serial number", "base board serial number",
+        "default", "unknown", "unspecified", "no asset information",
+        "empty", "xxxxxxxxxxxx", "0000000000", "____________",
+    }
+
+    def _is_valid_serial(self, value):
+        """Check if a serial string is real (not a placeholder)."""
+        if not value or not isinstance(value, str):
+            return False
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) < 2:
+            return False
+        if cleaned.lower() in self._DMI_PLACEHOLDERS:
+            return False
+        # Reject strings that are all the same character (e.g. "000000", "XXXX")
+        if len(set(cleaned.replace("-", "").replace(" ", ""))) <= 1:
+            return False
+        return True
+
+    def _get_best_serial(self):
+        """
+        Return the system serial from DMI, or None if unavailable.
+
+        No fallback cascade — the system serial is the system serial.
+        Baseboard/chassis serials are tracked as separate inventory items.
+        Machines are primarily identified by asset tag, not serial.
+        """
+        try:
+            tag = self.get_service_tag()
+            if self._is_valid_serial(tag):
+                return tag.strip()
+        except Exception:
+            pass
+
+        logging.warning("No valid system serial found for this device")
+        return None
+
+    def _get_chassis_serial(self):
+        """
+        Return the chassis serial number from DMI data.
+        Distinct from the system serial (service tag) on many servers.
+        """
+        _PLACEHOLDERS = {
+            "", "none", "n/a", "not specified", "not available",
+            "to be filled by o.e.m.", "default string", "0123456789",
+            "..................",
+        }
+        try:
+            if self.chassis:
+                serial = self.chassis[0].get("Serial Number", "").strip()
+                if serial and serial.lower() not in _PLACEHOLDERS:
+                    return serial
+        except (IndexError, KeyError, AttributeError):
+            pass
+        return None
+
+    def _get_bmc_mac(self):
+        """Return the BMC MAC address from IPMI, if available."""
+        try:
+            from netbox_agent.ipmi import IPMI
+            ipmi_data = IPMI().parse()
+            if ipmi_data and ipmi_data.get("mac"):
+                return ipmi_data["mac"].upper()
+        except Exception:
+            pass
+        return None
+
+    def _get_default_gateway_interface(self):
+        """
+        Detect the management interface by finding the default route.
+        Uses `ip -j route show default` (JSON output). The interface with
+        the default gateway is the management interface — same concept as
+        SILO's ansible_host (the IP used for SSH/management access).
+        Returns the interface name (e.g. "ens4035f0np0") or None.
+        """
+        try:
+            output = subprocess.check_output(
+                ["ip", "-j", "route", "show", "default"],
+                encoding="utf-8",
+                timeout=10,
+            )
+            routes = json.loads(output)
+            if routes and isinstance(routes, list):
+                dev = routes[0].get("dev")
+                if dev:
+                    logging.debug("Default gateway interface: %s", dev)
+                    return dev
+        except Exception as e:
+            logging.warning("Failed to detect default gateway interface: %s", e)
+        return None
 
     def print_debug(self):
         self.network = ServerNetwork(server=self)

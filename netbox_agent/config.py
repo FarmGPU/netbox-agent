@@ -11,6 +11,7 @@ def get_config():
     p = jsonargparse.ArgumentParser(
         default_config_files=[
             "/etc/netbox_agent.yaml",
+            "/etc/netbox-agent/config.yaml",
             "~/.config/netbox_agent.yaml",
             "~/.netbox_agent.yaml",
         ],
@@ -110,7 +111,7 @@ def get_config():
     p.add_argument("--slot_location.regex", help="Slot location regex to extract slot name")
     p.add_argument(
         "--network.ignore_interfaces",
-        default=r"(dummy.*|docker.*)",
+        default=r"(lo|dummy.*|docker.*|br-.*|veth.*|vnet.*|virbr.*)",
         help="Regex to ignore interfaces",
     )
     p.add_argument(
@@ -146,6 +147,87 @@ def get_config():
         "--force-disk-refresh", action="store_true", help="Forces disks detection reprocessing"
     )
     p.add_argument("--dump-disks-map", help="File path to dump physical/virtual disks map")
+
+    # Module-based inventory (replaces legacy inventory items)
+    p.add_argument(
+        "--modules",
+        action="store_true",
+        help="Enable Module-based hardware inventory (new Modules API)",
+    )
+    p.add_argument(
+        "--update-modules",
+        action="store_true",
+        help="Update module-based inventory on this run",
+    )
+    p.add_argument(
+        "--spare-device-name",
+        default="SPARE-INVENTORY",
+        help="Name of the spare inventory device for re-parenting",
+    )
+    p.add_argument(
+        "--device.default_owner",
+        default="FarmGPU",
+        help="Default owner value for new devices and modules",
+    )
+    p.add_argument(
+        "--device.asset_tag_cmd",
+        default=None,
+        help="Command to read asset tag from hardware (e.g., SMBIOS/FRU)",
+    )
+    p.add_argument(
+        "--network-only",
+        action="store_true",
+        help="Skip hardware sync, only update network interfaces and IPs",
+    )
+
+    # ARP neighbor reporting (sends MAC→IP pairs to bmc-api for reconciliation)
+    p.add_argument(
+        "--arp-report",
+        dest="arp_report_flag",
+        default=False,
+        action="store_true",
+        help="Run ARP neighbor scan and report to bmc-api (standalone mode)",
+    )
+    p.add_argument(
+        "--arp_report.enabled",
+        default=False,
+        action="store_true",
+        help="Enable ARP neighbor scanning and reporting to bmc-api",
+    )
+    p.add_argument(
+        "--arp_report.bmc_api_url",
+        default="http://localhost:8100",
+        help="bmc-api base URL for ARP pair submission",
+    )
+    p.add_argument(
+        "--arp_report.bmc_api_key",
+        default="",
+        help="bmc-api API key (operator role required)",
+    )
+    p.add_argument(
+        "--arp_report.interfaces",
+        default="",
+        help="Comma-separated interfaces to scan (empty = all non-ignored)",
+    )
+    p.add_argument(
+        "--arp_report.scan_timeout",
+        default=30,
+        type=int,
+        help="Timeout in seconds for arp-scan per interface",
+    )
+    p.add_argument(
+        "--state-dir",
+        default="/var/lib/netbox-agent-test",
+        help="Directory for state file (diff-based sync)",
+    )
+    p.add_argument(
+        "--sync-cadence",
+        type=int,
+        default=86400,
+        help="Expected sync interval in seconds. Should match the SHORTEST systemd timer "
+             "(e.g., 14400 for 4-hour network sync, even if full sync is daily). "
+             "This is the heartbeat rate — status-manager marks the device stale at 1.5x this value.",
+    )
 
     options = p.parse_args()
     return options

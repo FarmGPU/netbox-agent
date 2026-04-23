@@ -182,3 +182,7 @@ dmypy.json
 
 netbox-docker
 /.vscode
+
+# Dropping all one-off scripts from git history
+
+scripts/
