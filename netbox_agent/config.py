@@ -233,7 +233,21 @@ def get_config():
     return options
 
 
-config = get_config()
+class _LazyConfig:
+    """Defer argparse until first attribute access.
+
+    This allows importing the config module without triggering
+    argparse, which breaks pytest and --version handling.
+    """
+    _instance = None
+
+    def __getattr__(self, name):
+        if _LazyConfig._instance is None:
+            _LazyConfig._instance = get_config()
+        return getattr(_LazyConfig._instance, name)
+
+
+config = _LazyConfig()
 
 
 def get_netbox_instance():

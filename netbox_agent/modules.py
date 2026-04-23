@@ -865,36 +865,48 @@ class ModuleManager:
 
     def _get_local_nics(self):
         """
-        Detect physical NICs via lshw, grouped by card (using product+vendor).
-        Uses MAC address as a serial proxy. Filters out GPU cards that lshw
-        misclassifies as network devices (e.g. Habana Gaudi).
+        Detect physical NIC cards via lshw, grouped by PCI bus address.
+
+        Multi-port cards (e.g., dual-port ConnectX-7) share a PCI bus prefix
+        and are reported as a single module using the first port's MAC as serial.
+        InfiniBand interfaces (GUID > 6 bytes) are filtered out.
         """
         items = []
-        seen_macs = set()
+        seen_pci_cards = set()  # Track PCI card addresses (bus:slot, without function)
 
         for iface in self.lshw.interfaces:
             mac = iface.get("serial", iface.get("macaddress", ""))
             product = iface.get("product", "Unknown NIC")
             vendor = iface.get("vendor", "Unknown")
+            businfo = iface.get("businfo", "")
 
-            if not mac or mac in seen_macs:
+            if not mac:
                 continue
 
-            # Skip GPU cards that lshw classifies as network. Habana Gaudi
-            # is "Processing accelerators" in lspci but "network" in lshw.
+            # Skip InfiniBand interfaces — GUIDs are longer than Ethernet MACs
+            # Ethernet MACs: 17 chars (xx:xx:xx:xx:xx:xx)
+            # IB GUIDs: 20+ bytes, often with extra octets
+            if len(mac) > 17:
+                logger.debug("Skipping InfiniBand interface: %s (%s)", iface.get("name", ""), mac[:20])
+                continue
+
+            # Skip GPU cards that lshw classifies as network
             vendor_lower = vendor.lower()
             if any(gv in vendor_lower for gv in self._GPU_AS_NIC_VENDORS):
-                logger.debug(
-                    "Skipping GPU-as-NIC: %s %s (%s)",
-                    vendor, product, iface.get("name", ""),
-                )
+                logger.debug("Skipping GPU-as-NIC: %s %s", vendor, product)
                 continue
 
-            seen_macs.add(mac)
+            # Group by PCI card — strip function number to get card identity
+            # businfo format: "pci@0000:81:00.0" → card key "pci@0000:81:00"
+            card_key = businfo.rsplit(".", 1)[0] if businfo and "." in businfo else mac
+            if card_key in seen_pci_cards:
+                continue
+            seen_pci_cards.add(card_key)
+
             items.append({
                 "product": product,
                 "vendor": vendor,
-                "serial": mac,  # MAC as serial proxy
+                "serial": mac,  # First port's MAC as serial proxy
                 "description": iface.get("description", ""),
                 "name": iface.get("name", ""),
             })
