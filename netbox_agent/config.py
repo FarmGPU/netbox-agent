@@ -217,7 +217,7 @@ def get_config():
     )
     p.add_argument(
         "--state-dir",
-        default="/var/lib/netbox-agent-test",
+        default="/var/lib/netbox-agent",
         help="Directory for state file (diff-based sync)",
     )
     p.add_argument(
