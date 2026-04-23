@@ -844,14 +844,11 @@ class ServerBase:
             )
 
         logging.debug("Updating Server...")
-        # check network cards
-        if config.register or config.update_all or config.update_network or network_only:
-            self.network = ServerNetwork(server=self)
-            self.network.create_or_update_netbox_network_cards()
 
-        # When network_only, skip all hardware sync
+        # When network_only, skip hardware sync but still do network
         if not network_only:
-            # update modules if feature is enabled (Modules API)
+            # Modules BEFORE network — transceiver discovery in network sync
+            # needs NIC modules to exist for proper parent-child hierarchy.
             update_modules = getattr(config, "modules", False) and (
                 config.register or config.update_all or getattr(config, "update_modules", False)
             )
@@ -859,6 +856,13 @@ class ServerBase:
                 from netbox_agent.modules import ModuleManager
                 self.module_manager = ModuleManager(server=self, config=config)
                 self.module_manager.create_or_update(deps=deps, state=state)
+
+        # Network sync (interfaces, IPs, transceivers)
+        if config.register or config.update_all or config.update_network or network_only:
+            self.network = ServerNetwork(server=self)
+            self.network.create_or_update_netbox_network_cards()
+
+        if not network_only:
             # update psu
             if config.register or config.update_all or config.update_psu:
                 self.power = PowerSupply(server=self)

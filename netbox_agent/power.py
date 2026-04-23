@@ -113,8 +113,8 @@ class PowerSupply:
             logging.info("Could not find power feeds for Rack, defaulting value to 230")
             voltage = [230 for _ in nb_psus]
 
-        for i, nb_psu in enumerate(nb_psus):
-            nb_psu.allocated_draw = int(float(psu_cons[i]) * voltage[i])
+        for nb_psu, cons, volt in zip(nb_psus, psu_cons, voltage):
+            nb_psu.allocated_draw = int(float(cons) * volt)
             if nb_psu.allocated_draw < 1:
                 logging.info("PSU is not connected or in standby mode")
                 continue
