@@ -106,18 +106,76 @@ class LSHW:
 
     def find_storage(self, obj):
         if "children" in obj:
+            # For storage controllers with children, we need to handle two cases:
+            # 1. NVMe: parent has metadata, children have logical names
+            # 2. SAS/SCSI: children have both metadata and logical names
+            
+            parent_info = {
+                "product": obj.get("product"),
+                "vendor": obj.get("vendor"),
+                "serial": obj.get("serial"),
+                "version": obj.get("version"),
+                "description": obj.get("description"),
+            }
+            
             for device in obj["children"]:
-                self.disks.append(
-                    {
-                        "logicalname": device.get("logicalname"),
+                # Skip non-disk children (like hwmon, ng devices, enclosures)
+                if device.get("class") != "disk":
+                    continue
+                
+                # Skip devices without actual disk logical names
+                try:
+                    logicalname = device.get("logicalname")
+                    # Handle both string and list logicalname (e.g., ["/dev/nvme0n1", "/mnt/chunks1"])
+                    if isinstance(logicalname, list):
+                        # Find the first /dev/ path in the list
+                        dev_path = None
+                        for path in logicalname:
+                            if isinstance(path, str) and path.startswith("/dev/"):
+                                dev_path = path
+                                break
+                        if not dev_path:
+                            continue
+                        logicalname = dev_path
+                    elif not logicalname or not logicalname.startswith("/dev/"):
+                        continue
+                except:
+                    print('!', logicalname)
+                    continue
+                
+                # Skip namespace group devices (ng) - these are not actual disks
+                if "/dev/ng" in logicalname:
+                    continue
+                
+                # Check if the child has its own metadata (SAS/SCSI case)
+                # If child has product info, use it; otherwise use parent info (NVMe case)
+                if device.get("product"):
+                    # SAS/SCSI case: child has all the metadata
+                    disk_info = {
+                        "logicalname": logicalname,
                         "product": device.get("product"),
+                        "vendor": device.get("vendor"),
                         "serial": device.get("serial"),
                         "version": device.get("version"),
                         "size": device.get("size"),
                         "description": device.get("description"),
                         "type": device.get("description"),
                     }
-                )
+                else:
+                    # NVMe case: combine parent controller info with child namespace info
+                    # Try to get better info from nvme list command if available
+                    nvme_info = self._get_nvme_info(logicalname)
+                    disk_info = {
+                        "logicalname": logicalname,
+                        "product": nvme_info.get("product", parent_info["product"]),
+                        "vendor": nvme_info.get("vendor", parent_info["vendor"]),
+                        "serial": nvme_info.get("serial", parent_info["serial"]),
+                        "version": nvme_info.get("version", parent_info["version"]),
+                        "size": nvme_info.get("size", device.get("size")),
+                        "description": parent_info["description"],
+                        "type": parent_info["description"],
+                    }
+                self.disks.append(disk_info)
         elif "driver" in obj["configuration"] and "nvme" in obj["configuration"]["driver"]:
             if not is_tool("nvme"):
                 logging.error("nvme-cli >= 1.0 does not seem to be installed")
@@ -135,9 +193,13 @@ class LSHW:
                         "description": "NVME",
                         "type": "NVME",
                     }
-                    if "UsedSize" in device:
+                    # Use PhysicalSize for the actual disk capacity
+                    # UsedBytes/UsedSize only shows used space, not total capacity
+                    if "PhysicalSize" in device:
+                        d["size"] = device["PhysicalSize"]
+                    elif "UsedSize" in device:
                         d["size"] = device["UsedSize"]
-                    if "UsedBytes" in device:
+                    elif "UsedBytes" in device:
                         d["size"] = device["UsedBytes"]
                     self.disks.append(d)
             except Exception:
@@ -188,6 +250,28 @@ class LSHW:
                 "businfo": obj.get("businfo", ""),  # PCI bus ID for driver lookup
             }
             self.gpus.append(infos)
+
+    def _get_nvme_info(self, device_path):
+        """Get NVMe device information using nvme list command."""
+        if not is_tool("nvme"):
+            return {}
+        try:
+            nvme_output = subprocess.check_output(
+                ["nvme", "list", "-o", "json"], encoding="utf8"
+            )
+            nvme_data = json.loads(nvme_output)
+            for device in nvme_data.get("Devices", []):
+                if device.get("DevicePath") == device_path:
+                    return {
+                        "product": device.get("ModelNumber"),
+                        "serial": device.get("SerialNumber"),
+                        "version": device.get("Firmware"),
+                        "size": device.get("PhysicalSize") or device.get("UsedBytes"),
+                        "vendor": "Unknown",
+                    }
+        except Exception:
+            pass
+        return {}
 
     # Descriptions that indicate chipset infrastructure, NOT real accelerators.
     # These are IOMMU, host bridges, system peripherals, etc. that lshw

@@ -1,5 +1,6 @@
 from contextlib import suppress
 from netbox_agent.config import netbox_instance as nb
+from netbox_agent.logging import logging
 from slugify import slugify
 from shutil import which
 import distro

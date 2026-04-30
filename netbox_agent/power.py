@@ -87,8 +87,11 @@ class PowerSupply:
                     )
                     continue
                 logging.info("Creating PSU {name} ({description}), {maximum_draw}W".format(**psu))
-                nb_psu = nb.dcim.power_ports.create(**psu)
-
+                try:
+                    nb_psu = nb.dcim.power_ports.create(**psu)
+                except Exception as e:
+                    logging.error(f"Unable to create PSU: {e}")
+                    continue
         return True
 
     def report_power_consumption(self):

@@ -179,7 +179,16 @@ class ServerBase:
         """
         Return the Service Tag from dmidecode info
         """
-        return self.system[0]["Serial Number"].strip()
+        tag = self.system[0]["Serial Number"].strip()
+        if not tag:
+            tag = self.get_system_uuid()
+        return tag
+
+    def get_system_uuid(self):
+        """
+        Return the UUID from dmidecode info
+        """
+        return self.system[0].get('UUID')
 
     def get_expansion_service_tag(self):
         """
@@ -961,6 +970,28 @@ class ServerBase:
             server.platform = self.device_platform
             update += 1
 
+        # Validate oob_ip before saving - clear if invalid to prevent save errors
+        if server.oob_ip:
+            try:
+                oob_ip_id = server.oob_ip.id if hasattr(server.oob_ip, 'id') else server.oob_ip
+                oob_ip_obj = nb.ipam.ip_addresses.get(id=oob_ip_id)
+                if oob_ip_obj and not oob_ip_obj.assigned_object:
+                    logging.warning(f"Clearing invalid oob_ip {oob_ip_obj.address} - not assigned to any interface")
+                    server.oob_ip = None
+                    update += 1
+                elif oob_ip_obj and oob_ip_obj.assigned_object:
+                    assigned_device_id = None
+                    if hasattr(oob_ip_obj.assigned_object, 'device'):
+                        assigned_device_id = oob_ip_obj.assigned_object.device.id
+                    if assigned_device_id and assigned_device_id != server.id:
+                        logging.warning(f"Clearing invalid oob_ip {oob_ip_obj.address} - assigned to different device")
+                        server.oob_ip = None
+                        update += 1
+            except Exception as e:
+                logging.warning(f"Error validating oob_ip, clearing: {e}")
+                server.oob_ip = None
+                update += 1
+
         if update:
             server.save()
 
@@ -1175,6 +1206,7 @@ class ServerBase:
         print("Chassis:", self.get_chassis())
         print("Chassis service tag:", self.get_chassis_service_tag())
         print("Service tag:", self.get_service_tag())
+        print("UUID:", self.get_system_uuid())
         print(
             "NIC:",
         )
