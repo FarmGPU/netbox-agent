@@ -716,9 +716,16 @@ class ModuleManager:
             size_bytes = blk.get("size")
             rev = (blk.get("rev") or "").strip() or None
 
-            # Treat placeholder serials as missing
-            if serial in ("_", "0", "unknown", "N/A", "UNKNOWN"):
+            # Treat placeholder serials as missing.
+            # "SSN" / "ModelNumber" appear as literal values when an NVMe
+            # drive's identify response is malformed (failed drive returns
+            # the spec field names instead of values). Combined with the
+            # "no model and no serial → skip" rule below, this filters out
+            # drives that can't be reliably identified.
+            if serial in ("_", "0", "unknown", "N/A", "UNKNOWN", "SSN"):
                 serial = None
+            if model == "ModelNumber":
+                model = None
 
             # For NVMe devices, read identity from sysfs controller
             # (more reliable than lsblk — works even when NVMe char device is locked)
