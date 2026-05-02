@@ -7,7 +7,14 @@ from netbox_agent.misc import is_tool
 class LLDP:
     def __init__(self, output=None):
         if not is_tool("lldpctl"):
-            logging.debug("lldpd package seems to be missing or daemon not running.")
+            # Promoted from debug to warning: lldpd is the source of truth
+            # for per-iface (per-bond-slave) cabling; without it bonded
+            # NICs will not be cabled to their switch ports (INF-320).
+            logging.warning(
+                "lldpd / lldpctl not found — bonded NIC slaves will not be "
+                "cabled in NetBox. Install with `apt install lldpd && "
+                "systemctl enable --now lldpd`."
+            )
         if output:
             self.output = output
         else:

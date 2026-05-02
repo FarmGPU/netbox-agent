@@ -691,8 +691,15 @@ class Network(object):
                     interface.untagged_vlan = nb_vlan.id
             interface.save()
 
-        # cable the interface
-        if config.network.lldp and isinstance(self, ServerNetwork):
+        # cable the interface — but never on a bond/LAG iface itself.
+        # NetBox 4.x rejects cables on type=lag; cables belong on the
+        # physical slave NICs, which iterate as separate nics in the
+        # outer loop (INF-320).
+        if (
+            config.network.lldp
+            and isinstance(self, ServerNetwork)
+            and not nic.get("bonding")
+        ):
             switch_ip = self.lldp.get_switch_ip(interface.name)
             switch_interface = self.lldp.get_switch_port(interface.name)
 
@@ -1080,8 +1087,13 @@ class Network(object):
                     nic_update += 1
                     interface.lag = None
 
-            # cable the interface
-            if config.network.lldp and isinstance(self, ServerNetwork):
+            # cable the interface — never on a bond/LAG iface itself
+            # (NetBox 4.x rejects cables on type=lag, INF-320).
+            if (
+                config.network.lldp
+                and isinstance(self, ServerNetwork)
+                and not nic.get("bonding")
+            ):
                 switch_ip = self.lldp.get_switch_ip(interface.name)
                 switch_interface = self.lldp.get_switch_port(interface.name)
                 if switch_ip and switch_interface:
