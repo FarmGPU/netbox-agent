@@ -29,6 +29,14 @@ class LLDP:
             if "=" not in entry:
                 continue
             path, value = entry.strip().split("=", 1)
+            # When a chassis advertises both IPv4 and IPv6 mgmt-ips,
+            # lldpctl emits separate `chassis.mgmt-ip=` lines and the
+            # parser overwrites — so the LAST one wins. IPv6 link-local
+            # (`fe80::*`) is non-addressable for NetBox switch lookup;
+            # drop it so the IPv4 mgmt-ip stays as the resolved switch
+            # address (INF-320).
+            if path.endswith("chassis.mgmt-ip") and value.lower().startswith("fe80"):
+                continue
             split_path = path.split(".")
             interface = split_path[1]
             path_components, final = split_path[:-1], split_path[-1]
