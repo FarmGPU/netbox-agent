@@ -594,6 +594,25 @@ class Network(object):
         parts = mac.split(":")
         return len(parts) == 6 and all(len(p) == 2 for p in parts)
 
+    def _all_macs(self, nic):
+        """All MACs to sync onto a NIC: primary first, then permanent if distinct.
+
+        For LACP bond slaves, `nic["mac"]` is the inherited bond MAC (shared
+        across slaves) and `ethtool -P` returns the slave's hardware-burned
+        MAC. Persisting both lets switch-side LACP partner-MAC observations
+        resolve to the specific physical slave (INF-318).
+        """
+        macs = []
+        primary = nic.get("mac")
+        if primary and self._is_valid_mac(primary):
+            macs.append(primary.upper())
+        perm = (nic.get("ethtool") or {}).get("mac_address")
+        if perm and self._is_valid_mac(perm):
+            perm_u = perm.upper()
+            if perm_u not in macs:
+                macs.append(perm_u)
+        return macs
+
     def update_interface_macs(self, nic, macs):
         """Sync MAC address objects on an interface. Returns current MAC objects."""
         nb_macs = list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
@@ -984,7 +1003,7 @@ class Network(object):
             if version.parse(nb.version) >= version.parse("4.2"):
                 # Sync MAC objects and set primary_mac_address (by ID)
                 if nic["mac"]:
-                    mac_objs = self.update_interface_macs(interface, [nic["mac"]])
+                    mac_objs = self.update_interface_macs(interface, self._all_macs(nic))
                     # Find the MAC object matching nic["mac"] and set as primary
                     primary_mac_id = None
                     for mac_obj in (mac_objs or []):
