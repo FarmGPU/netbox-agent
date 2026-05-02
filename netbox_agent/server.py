@@ -883,6 +883,36 @@ class ServerBase:
                     self.power.report_power_consumption()
                 except Exception as e:
                     logging.warning("Power consumption reporting failed: %s", e)
+            # update virtualization cluster and virtual machines
+            # Auto-detect Proxmox: assign to cluster from corosync.conf
+            # without requiring config.virtual.hypervisor to be set.
+            if self._is_proxmox_host() and not config.virtual.hypervisor:
+                cluster_name = self._read_proxmox_cluster_name()
+                if cluster_name:
+                    cluster = nb.virtualization.clusters.get(name=cluster_name)
+                    if cluster:
+                        nb_server = self.get_netbox_server()
+                        if nb_server and getattr(nb_server, 'cluster', None) != cluster:
+                            nb_server.cluster = cluster.id
+                            nb_server.save()
+                            logging.info(
+                                "Auto-assigned Proxmox host '%s' to cluster '%s'",
+                                nb_server.name, cluster_name,
+                            )
+                    else:
+                        logging.warning(
+                            "Proxmox cluster '%s' not found in NetBox — "
+                            "create it first or set virtual.cluster_name",
+                            cluster_name,
+                        )
+            elif config.virtual.hypervisor and (
+                config.register or config.update_all or config.update_hypervisor
+            ):
+                self.hypervisor = Hypervisor(server=self)
+                self.hypervisor.create_or_update_device_cluster()
+                if config.virtual.list_guests_cmd:
+                    self.hypervisor.create_or_update_device_virtual_machines()
+
         expansion = nb.dcim.devices.get(serial=self.get_expansion_service_tag())
         if self.own_expansion_slot() and config.expansion_as_device:
             logging.debug("Update Server expansion...")
