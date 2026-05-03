@@ -1206,21 +1206,28 @@ class ServerNetwork(Network):
                 switch_ip, switch_interface, nb_server_interface
             )
         else:
+            # Verify the existing cable still points to the LLDP-reported
+            # switch + port. We already have switch_ip from LLDP — look it
+            # up in IPAM directly and confirm it's assigned to an iface on
+            # the cable's far-side switch. Avoids the previous code's
+            # `nb.dcim.interfaces.get(mgmt_only=True)` which raised ValueError
+            # on switches with more than one mgmt_only iface (e.g., Arista's
+            # Management + Management1).
             nb_sw_int = nb_server_interface.cable.b_terminations[0]
             nb_sw = nb_sw_int.device
-            nb_mgmt_int = nb.dcim.interfaces.get(device_id=nb_sw.id, mgmt_only=True)
-            nb_mgmt_ip = nb.ipam.ip_addresses.get(interface_id=nb_mgmt_int.id)
-            if nb_mgmt_ip is None:
-                logging.error(
-                    "Switch {switch_ip} does not have IP on its management interface".format(
-                        switch_ip=switch_ip,
-                    )
-                )
-                return update, nb_server_interface
 
-            # Netbox IP is always IP/Netmask
-            nb_mgmt_ip = nb_mgmt_ip.address.split("/")[0]
-            if nb_mgmt_ip != switch_ip or nb_sw_int.name != switch_interface:
+            # Look up the LLDP-reported IP in IPAM. CIDR notation in NetBox.
+            lldp_ip_objs = list(nb.ipam.ip_addresses.filter(address=switch_ip))
+            cabled_to_correct_switch = False
+            for ip_obj in lldp_ip_objs:
+                if ip_obj.assigned_object_type != "dcim.interface":
+                    continue
+                assigned_iface = nb.dcim.interfaces.get(ip_obj.assigned_object_id)
+                if assigned_iface and assigned_iface.device.id == nb_sw.id:
+                    cabled_to_correct_switch = True
+                    break
+
+            if not cabled_to_correct_switch or nb_sw_int.name != switch_interface:
                 logging.info("Netbox cable is not connected to correct ports, fixing..")
                 logging.info(
                     "Deleting cable {cable_id} from {interface} to {switch_interface} of "
@@ -1228,7 +1235,7 @@ class ServerNetwork(Network):
                         cable_id=nb_server_interface.cable.id,
                         interface=nb_server_interface.name,
                         switch_interface=nb_sw_int.name,
-                        switch_ip=nb_mgmt_ip,
+                        switch_ip=switch_ip,
                     )
                 )
                 cable = nb.dcim.cables.get(nb_server_interface.cable.id)
