@@ -1150,6 +1150,20 @@ class ServerNetwork(Network):
             logging.error("Switch IP {} cannot be found in Netbox".format(switch_ip))
             return nb_server_interface
 
+        # The IP record may exist in IPAM without being assigned to any
+        # interface (bare IP) — e.g., partially-enrolled DPU mgmt addresses,
+        # or LLDP neighbors that happen to be hosts/DPUs whose mgmt-ip is
+        # tracked but not as a switch interface. In that case
+        # `assigned_object` is None and `.device` raises AttributeError.
+        # Treat it the same as "not associated to a Netbox Switch Device".
+        if nb_mgmt_ip.assigned_object is None:
+            logging.error(
+                "Switch IP {} is found but not assigned to any interface in Netbox".format(
+                    switch_ip
+                )
+            )
+            return nb_server_interface
+
         try:
             nb_switch = nb_mgmt_ip.assigned_object.device
             logging.info(
@@ -1157,7 +1171,7 @@ class ServerNetwork(Network):
                     switch_ip, nb_switch.id
                 )
             )
-        except KeyError:
+        except (KeyError, AttributeError):
             logging.error(
                 "Switch IP {} is found but not associated to a Netbox Switch Device".format(
                     switch_ip
