@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import subprocess
 from itertools import chain, islice
 from pathlib import Path
 
@@ -13,8 +14,48 @@ from netbox_agent.config import netbox_instance as nb
 from netbox_agent.ethtool import Ethtool
 from netbox_agent.ipmi import IPMI
 from netbox_agent.lldp import LLDP
+from netbox_agent.misc import is_tool
 
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
+
+
+def _get_ovs_bonds():
+    """Return {bond_name: [slave_names]} for Open vSwitch-managed bonds.
+
+    OVS bonds are managed by ovs-vswitchd, not the Linux bonding driver, so
+    they don't expose `/sys/class/net/<bond>/bonding/`. Without this lookup,
+    the agent treats them as generic virtual interfaces — which on Proxmox
+    hosts (the main consumers of OVS in our fleet) silently corrupts the LAG
+    model: bond gets typed `virtual`, slaves never get `lag` pointers, and
+    NetBox can end up rejecting writes that were valid in the kernel-bond
+    case (INF-322).
+
+    Returns an empty dict when ovs-appctl isn't available or returns an
+    error — callers should fall back to kernel-bond detection only.
+    """
+    if not is_tool("ovs-appctl"):
+        return {}
+    try:
+        out = subprocess.check_output(
+            ["ovs-appctl", "bond/list"], encoding="utf-8", timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logging.debug("ovs-appctl bond/list failed: %s", e)
+        return {}
+
+    # Output format (tab-separated):
+    #   bond    type            recircID    members
+    #   bond0   balance-tcp     1           enp129s0f0np0, enp129s0f1np1
+    bonds = {}
+    for line in out.splitlines()[1:]:  # skip header
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        bond_name = parts[0].strip()
+        members = [m.strip() for m in parts[3].split(",") if m.strip()]
+        if bond_name and members:
+            bonds[bond_name] = members
+    return bonds
 
 
 # Per-device cache: interface MAC (upper) → nic_module pynetbox object
@@ -338,6 +379,11 @@ class Network(object):
     def scan(self):
         nics = []
         ignore_re = self._build_ignore_re()
+        # OVS bonds aren't visible through /sys/class/net/<bond>/bonding;
+        # query ovs-appctl once up-front so the per-iface loop below can
+        # treat OVS and kernel bonds uniformly. Empty dict when OVS isn't
+        # installed (the common case on bare-metal Linux).
+        ovs_bonds = _get_ovs_bonds()
         for interface in os.listdir("/sys/class/net/"):
             # ignore if it's not a link (ie: bonding_masters etc)
             if not os.path.islink("/sys/class/net/{}".format(interface)):
@@ -409,6 +455,11 @@ class Network(object):
                 bonding_slaves = (
                     open("/sys/class/net/{}/bonding/slaves".format(interface)).read().split()
                 )
+            elif interface in ovs_bonds:
+                # Open vSwitch-managed bond (Proxmox/OVS hosts). See
+                # _get_ovs_bonds() and INF-322 for the why.
+                bonding = True
+                bonding_slaves = ovs_bonds[interface]
 
             virtual = Path(f"/sys/class/net/{interface}").resolve().parent == VIRTUAL_NET_FOLDER
 
