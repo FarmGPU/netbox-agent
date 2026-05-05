@@ -1016,72 +1016,72 @@ class Network(object):
     def _enrich_ip(self, netbox_ip, interface):
         """Set dns_name, tenant, and interface assignment on an existing IP.
 
-        Two distinct collision shapes guarded against here:
+        The host's `ip addr show` is the source of truth for which iface
+        owns an IP — if a NIC carries it on the wire, NetBox should
+        reflect that. NetBox 4.x rejects the iface reassignment patch
+        when the IP is currently designated as the parent object's
+        primary_ip4 / oob_ip; we clear that reference first so the
+        reassignment succeeds.
 
-        1. Same-namespace iface change (dcim.interface -> dcim.interface).
-           NetBox 4.x rejects the reassignment when the IP is the device's
-           primary_ip4 / oob_ip. Common when an iface is renamed (legacy
-           `net0` -> kernel-canonical `enp25s0f0np0`). Resolution: clear
-           the primary_ip4 / oob_ip references on the owning device first;
-           server.py:netbox_create_or_update re-binds them later.
+        Two parent-object shapes the IP may currently belong to:
 
-        2. Cross-namespace conflict (virtualization.vminterface <->
-           dcim.interface). The same IP is claimed by a VM record AND a
-           bare-metal host on the same subnet — a real network-level
-           collision, not a stale-iface artifact. Stealing the IP from
-           the VM would corrupt proxmox-sync's data and break the VM's
-           NetBox identity. Resolution: refuse the reassignment, log
-           loudly, and let the operator resolve the upstream conflict
-           (decommission the VM, renumber one side, etc.).
+        - dcim.interface  -> parent is a Device (has primary_ip4 + oob_ip)
+        - virtualization.vminterface -> parent is a VirtualMachine
+                                        (has primary_ip4 only)
+
+        Cross-namespace cases (VM iface holds an IP that a bare-metal
+        host now claims) are usually stale proxmox-sync records that
+        weren't pruned after VM decommission — same treatment, clear
+        the VM's primary_ip4 reference and let proxmox-sync's next
+        cycle reconcile the orphan.
         """
         old_obj_type = netbox_ip.assigned_object_type
         old_obj_id = netbox_ip.assigned_object_id
         new_obj_type = self.assigned_object_type
         new_obj_id = interface.id
 
-        # Case 2: cross-namespace conflict — refuse, don't fabricate.
-        if old_obj_type and old_obj_type != new_obj_type:
-            logging.warning(
-                "IP %s is currently assigned to %s (id %s); host wants it on "
-                "%s/%s. Cross-namespace IP collision — refusing to reassign "
-                "to avoid corrupting the other namespace's record. Resolve "
-                "the upstream conflict (e.g. decommission the VM holding "
-                "this IP, or renumber one side).",
-                netbox_ip.address, old_obj_type, old_obj_id,
-                new_obj_type, getattr(interface, "name", interface.id),
-            )
-            return
-
-        # Case 1: same-namespace iface change — clear primary_ip4 / oob_ip
-        # references on the current owner so NetBox accepts the patch.
-        if old_obj_id and old_obj_id != new_obj_id:
+        if old_obj_id and (old_obj_id != new_obj_id or old_obj_type != new_obj_type):
             try:
-                current_iface = nb.dcim.interfaces.get(old_obj_id)
-                if current_iface and current_iface.device:
-                    current_dev = nb.dcim.devices.get(current_iface.device.id)
-                    if current_dev:
-                        updates = {}
-                        if (
-                            current_dev.primary_ip4
-                            and current_dev.primary_ip4.id == netbox_ip.id
-                        ):
-                            updates["primary_ip4"] = None
-                        if (
-                            current_dev.oob_ip
-                            and current_dev.oob_ip.id == netbox_ip.id
-                        ):
-                            updates["oob_ip"] = None
-                        if updates:
-                            logging.info(
-                                "Clearing %s on %s before reassigning IP %s "
-                                "from iface %s to iface %s",
-                                list(updates.keys()),
-                                current_dev.name,
-                                netbox_ip.address,
-                                current_iface.name,
-                                interface.name,
-                            )
-                            current_dev.update(updates)
+                current_owner = None
+                current_iface_name = None
+                if old_obj_type == "dcim.interface":
+                    ci = nb.dcim.interfaces.get(old_obj_id)
+                    if ci and ci.device:
+                        current_iface_name = ci.name
+                        current_owner = nb.dcim.devices.get(ci.device.id)
+                elif old_obj_type == "virtualization.vminterface":
+                    vi = nb.virtualization.interfaces.get(old_obj_id)
+                    if vi and vi.virtual_machine:
+                        current_iface_name = vi.name
+                        current_owner = nb.virtualization.virtual_machines.get(
+                            vi.virtual_machine.id
+                        )
+
+                if current_owner:
+                    updates = {}
+                    if (
+                        current_owner.primary_ip4
+                        and current_owner.primary_ip4.id == netbox_ip.id
+                    ):
+                        updates["primary_ip4"] = None
+                    # oob_ip exists on Device, not on VirtualMachine — guard
+                    if (
+                        getattr(current_owner, "oob_ip", None)
+                        and current_owner.oob_ip.id == netbox_ip.id
+                    ):
+                        updates["oob_ip"] = None
+                    if updates:
+                        logging.info(
+                            "Clearing %s on %s (%s/%s) before reassigning IP "
+                            "%s to %s",
+                            list(updates.keys()),
+                            current_owner.name,
+                            old_obj_type,
+                            current_iface_name,
+                            netbox_ip.address,
+                            interface.name,
+                        )
+                        current_owner.update(updates)
             except Exception:
                 logging.debug(
                     "Pre-reassign primary_ip4/oob_ip clear failed (proceeding anyway)",
