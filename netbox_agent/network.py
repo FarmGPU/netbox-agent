@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -56,6 +57,56 @@ def _get_ovs_bonds():
         if bond_name and members:
             bonds[bond_name] = members
     return bonds
+
+
+def _default_route_iface():
+    """Return the iface name of the IPv4 default route, or None.
+
+    The default-route iface is the management interface by definition —
+    it's the path used to reach this host from outside. scan() uses this
+    so the ignore_interfaces regex can never filter out the iface that
+    owns primary_ip4. Without the guarantee, hosts that put their mgmt
+    IP on a Linux bridge (standalone Proxmox: vmbr0) or on any iface
+    that happens to match an operator's ignore pattern would have
+    primary_ip4 silently fail to resolve.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ip", "-j", "route", "show", "default"],
+            encoding="utf-8", timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logging.debug("ip route show default failed: %s", e)
+        return None
+    try:
+        routes = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    if routes and isinstance(routes, list):
+        return routes[0].get("dev")
+    return None
+
+
+def _is_bridge(name):
+    """True iff /sys/class/net/<name> is a Linux bridge."""
+    return os.path.isdir(f"/sys/class/net/{name}/bridge")
+
+
+def _get_bridge_members(name):
+    """Return the list of port-member iface names for a Linux bridge.
+
+    Linux bridges expose port-members under /sys/class/net/<br>/brif/<port>.
+    Empty list for non-bridges or unreadable bridges. Members may include
+    physical NICs (eno1), bonds (bond0), or VM/container endpoints
+    (tap*, veth*) — callers filter by what survived ignore_interfaces.
+    """
+    brif = f"/sys/class/net/{name}/brif"
+    if not os.path.isdir(brif):
+        return []
+    try:
+        return sorted(os.listdir(brif))
+    except OSError:
+        return []
 
 
 # Per-device cache: interface MAC (upper) → nic_module pynetbox object
@@ -379,6 +430,12 @@ class Network(object):
     def scan(self):
         nics = []
         ignore_re = self._build_ignore_re()
+        # The default-route iface is the host's management interface by
+        # definition. Always enroll it, even if it matches the ignore
+        # regex (e.g., standalone Proxmox where mgmt lives on vmbr0).
+        # Without this carve-out, primary_ip4 can never resolve. Logged
+        # at INFO when the override fires so it's visible in journalctl.
+        mgmt_iface = _default_route_iface() or ""
         # OVS bonds aren't visible through /sys/class/net/<bond>/bonding;
         # query ovs-appctl once up-front so the per-iface loop below can
         # treat OVS and kernel bonds uniformly. Empty dict when OVS isn't
@@ -390,8 +447,17 @@ class Network(object):
                 continue
 
             if ignore_re and ignore_re.match(interface):
-                logging.debug("Ignore interface {interface}".format(interface=interface))
-                continue
+                if interface == mgmt_iface:
+                    logging.info(
+                        "Default-route iface %s matched ignore_interfaces; "
+                        "enrolling anyway so primary_ip4 can resolve.",
+                        interface,
+                    )
+                else:
+                    logging.debug(
+                        "Ignore interface {interface}".format(interface=interface)
+                    )
+                    continue
 
             ip_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET, [])
             ip6_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET6, [])
@@ -461,6 +527,14 @@ class Network(object):
                 bonding = True
                 bonding_slaves = ovs_bonds[interface]
 
+            # Linux bridge detection mirrors the bonding lookup above.
+            # The bridge holds the IP; physical port-members carry the
+            # cable. _set_bridge_interfaces() points each member's
+            # iface.bridge at the bridge iface afterwards (parallel to
+            # _set_bonding_interfaces() for LAG slaves).
+            bridge = _is_bridge(interface)
+            bridge_members = _get_bridge_members(interface) if bridge else []
+
             virtual = Path(f"/sys/class/net/{interface}").resolve().parent == VIRTUAL_NET_FOLDER
 
             nic = {
@@ -478,6 +552,8 @@ class Network(object):
                 "mtu": mtu,
                 "bonding": bonding,
                 "bonding_slaves": bonding_slaves,
+                "bridge": bridge,
+                "bridge_members": bridge_members,
             }
             nics.append(nic)
         return nics
@@ -504,6 +580,38 @@ class Network(object):
             return False
         return True
 
+    def _set_bridge_interfaces(self):
+        """Point each bridge port-member's iface.bridge at the bridge iface.
+
+        Mirrors _set_bonding_interfaces() for LAG slaves. Once populated,
+        NetBox can navigate bridge → physical port-member → cable →
+        switch port — same shape as VLAN subiface → parent → cable.
+        Members that were filtered out (tap*, veth*, fwbr* under the
+        Proxmox ignore pattern) aren't in self.nics, so they're skipped
+        naturally without an HTTP roundtrip per VM.
+        """
+        bridge_nics = [x for x in self.nics if x.get("bridge")]
+        for nic in bridge_nics:
+            bridge_int = self.get_netbox_network_card(nic)
+            if not bridge_int:
+                continue
+            members = nic.get("bridge_members") or []
+            for member_int in (
+                self.get_netbox_network_card(member_nic)
+                for member_nic in self.nics
+                if member_nic["name"] in members
+            ):
+                if member_int is None:
+                    continue
+                current = getattr(member_int, "bridge", None)
+                if current is None or current.id != bridge_int.id:
+                    logging.debug(
+                        "Setting iface %s bridge=%s",
+                        member_int.name, bridge_int.name,
+                    )
+                    member_int.bridge = bridge_int
+                    member_int.save()
+
     def get_network_cards(self):
         return self.nics
 
@@ -523,6 +631,13 @@ class Network(object):
 
         if nic.get("bonding"):
             return self.dcim_choices["interface:type"]["Link Aggregation Group (LAG)"]
+
+        # Bridges must be checked before the generic `virtual` fallback;
+        # they live under /sys/devices/virtual/net/ so they'd otherwise
+        # be typed Virtual. Bridge is a dedicated NetBox interface type
+        # (since 3.0) — parallels typing bonds as LAG rather than Virtual.
+        if nic.get("bridge"):
+            return self.dcim_choices["interface:type"]["Bridge"]
 
         if nic.get("virtual"):
             return self.dcim_choices["interface:type"]["Virtual"]
@@ -742,14 +857,17 @@ class Network(object):
                     interface.untagged_vlan = nb_vlan.id
             interface.save()
 
-        # cable the interface — but never on a bond/LAG iface itself.
-        # NetBox 4.x rejects cables on type=lag; cables belong on the
-        # physical slave NICs, which iterate as separate nics in the
-        # outer loop (INF-320).
+        # cable the interface — but never on a bond/LAG or bridge iface
+        # itself. NetBox rejects cables on type=lag; bridges are software
+        # constructs with no wire. Cables belong on the physical
+        # members, which iterate as separate nics in the outer loop
+        # (INF-320 for LAG slaves; same reasoning extends to bridge
+        # port-members).
         if (
             config.network.lldp
             and isinstance(self, ServerNetwork)
             and not nic.get("bonding")
+            and not nic.get("bridge")
         ):
             switch_ip = self.lldp.get_switch_ip(interface.name)
             switch_interface = self.lldp.get_switch_port(interface.name)
@@ -1138,12 +1256,14 @@ class Network(object):
                     nic_update += 1
                     interface.lag = None
 
-            # cable the interface — never on a bond/LAG iface itself
-            # (NetBox 4.x rejects cables on type=lag, INF-320).
+            # cable the interface — never on a bond/LAG or bridge iface
+            # itself (NetBox 4.x rejects cables on type=lag, INF-320;
+            # bridges are software constructs with no wire).
             if (
                 config.network.lldp
                 and isinstance(self, ServerNetwork)
                 and not nic.get("bonding")
+                and not nic.get("bridge")
             ):
                 switch_ip = self.lldp.get_switch_ip(interface.name)
                 switch_interface = self.lldp.get_switch_port(interface.name)
@@ -1161,6 +1281,7 @@ class Network(object):
                 interface.save()
 
         self._set_bonding_interfaces()
+        self._set_bridge_interfaces()
         logging.debug("Finished updating NIC!")
 
 
