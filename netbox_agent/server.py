@@ -971,8 +971,16 @@ class ServerBase:
         # Set via config: sync_cadence (CLI --sync-cadence or YAML sync_cadence).
         local_cf["agent_cadence"] = getattr(config, "sync_cadence", 86400)
 
-        if server.custom_fields != local_cf:
-            server.custom_fields = local_cf
+        # Merge agent-owned CFs into the existing dict instead of replacing
+        # the whole thing. Other workers (vast-sync, proxmox-sync,
+        # status-manager, bmc-scan) write their own CFs (last_vast_sync,
+        # vmid, last_bmc_seen, managed_by, etc.) — replacing the dict
+        # silently dropped them every agent run. Update only the keys the
+        # agent owns; preserve everything else.
+        existing_cf = dict(server.custom_fields or {})
+        merged_cf = {**existing_cf, **local_cf}
+        if merged_cf != existing_cf:
+            server.custom_fields = merged_cf
             update += 1
 
         # Transition device to "active" on successful agent sync.
