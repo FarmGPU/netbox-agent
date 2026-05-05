@@ -461,6 +461,22 @@ class Network(object):
 
             ip_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET, [])
             ip6_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET6, [])
+
+            # Linux IPv4 alias labels (e.g., 'enp65s0f1:e') attach an IP to
+            # a parent iface under a separate label name. netifaces exposes
+            # each label as its own pseudo-interface, but the IP really
+            # belongs to the parent — `/sys/class/net` only lists the bare
+            # iface, so without this loop the labeled alias's IP was
+            # silently dropped (seen on VAST appliances where the mgmt IP
+            # is configured this way). Pick up both families for symmetry.
+            alias_prefix = "{}:".format(interface)
+            for alias in netifaces.interfaces():
+                if not alias.startswith(alias_prefix):
+                    continue
+                alias_ifaddrs = netifaces.ifaddresses(alias)
+                ip_addr.extend(alias_ifaddrs.get(netifaces.AF_INET, []))
+                ip6_addr.extend(alias_ifaddrs.get(netifaces.AF_INET6, []))
+
             if config.network.ignore_ips:
                 ip_addr = [ip for ip in ip_addr
                            if not re.match(config.network.ignore_ips, ip["addr"])]
