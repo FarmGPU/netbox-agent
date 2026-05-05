@@ -1014,7 +1014,58 @@ class Network(object):
             netbox_ip.save()
 
     def _enrich_ip(self, netbox_ip, interface):
-        """Set dns_name, tenant, and interface assignment on an existing IP."""
+        """Set dns_name, tenant, and interface assignment on an existing IP.
+
+        NetBox 4.x rejects iface reassignment when the IP is currently
+        designated as primary_ip4 / oob_ip on a device — the validator
+        protects against orphaning the device's primary identity. The
+        agent encounters this on hosts where a stale iface (e.g. an
+        old `net0` from a prior naming convention) holds the IP that's
+        now reported on a fresh iface name (e.g. `enp25s0f0np0`).
+
+        Mirrors the pattern in shared/netbox.py:get_or_create_ip — when
+        the IP is moving between ifaces, look up the device that
+        currently owns it and clear its primary_ip4 / oob_ip references
+        first so the save() succeeds. server.py:netbox_create_or_update
+        re-binds primary_ip4 / oob_ip to the IP at its new location
+        later in the same sync run.
+        """
+        old_obj_id = netbox_ip.assigned_object_id
+        new_obj_id = interface.id
+        if old_obj_id and old_obj_id != new_obj_id:
+            try:
+                current_iface = nb.dcim.interfaces.get(old_obj_id)
+                if current_iface and current_iface.device:
+                    current_dev = nb.dcim.devices.get(current_iface.device.id)
+                    if current_dev:
+                        updates = {}
+                        if (
+                            current_dev.primary_ip4
+                            and current_dev.primary_ip4.id == netbox_ip.id
+                        ):
+                            updates["primary_ip4"] = None
+                        if (
+                            current_dev.oob_ip
+                            and current_dev.oob_ip.id == netbox_ip.id
+                        ):
+                            updates["oob_ip"] = None
+                        if updates:
+                            logging.info(
+                                "Clearing %s on %s before reassigning IP %s "
+                                "from iface %s to iface %s",
+                                list(updates.keys()),
+                                current_dev.name,
+                                netbox_ip.address,
+                                current_iface.name,
+                                interface.name,
+                            )
+                            current_dev.update(updates)
+            except Exception:
+                logging.debug(
+                    "Pre-reassign primary_ip4/oob_ip clear failed (proceeding anyway)",
+                    exc_info=True,
+                )
+
         netbox_ip.assigned_object_type = self.assigned_object_type
         netbox_ip.assigned_object_id = interface.id
         dns = self._ip_dns_name()
