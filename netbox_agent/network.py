@@ -1016,22 +1016,44 @@ class Network(object):
     def _enrich_ip(self, netbox_ip, interface):
         """Set dns_name, tenant, and interface assignment on an existing IP.
 
-        NetBox 4.x rejects iface reassignment when the IP is currently
-        designated as primary_ip4 / oob_ip on a device — the validator
-        protects against orphaning the device's primary identity. The
-        agent encounters this on hosts where a stale iface (e.g. an
-        old `net0` from a prior naming convention) holds the IP that's
-        now reported on a fresh iface name (e.g. `enp25s0f0np0`).
+        Two distinct collision shapes guarded against here:
 
-        Mirrors the pattern in shared/netbox.py:get_or_create_ip — when
-        the IP is moving between ifaces, look up the device that
-        currently owns it and clear its primary_ip4 / oob_ip references
-        first so the save() succeeds. server.py:netbox_create_or_update
-        re-binds primary_ip4 / oob_ip to the IP at its new location
-        later in the same sync run.
+        1. Same-namespace iface change (dcim.interface -> dcim.interface).
+           NetBox 4.x rejects the reassignment when the IP is the device's
+           primary_ip4 / oob_ip. Common when an iface is renamed (legacy
+           `net0` -> kernel-canonical `enp25s0f0np0`). Resolution: clear
+           the primary_ip4 / oob_ip references on the owning device first;
+           server.py:netbox_create_or_update re-binds them later.
+
+        2. Cross-namespace conflict (virtualization.vminterface <->
+           dcim.interface). The same IP is claimed by a VM record AND a
+           bare-metal host on the same subnet — a real network-level
+           collision, not a stale-iface artifact. Stealing the IP from
+           the VM would corrupt proxmox-sync's data and break the VM's
+           NetBox identity. Resolution: refuse the reassignment, log
+           loudly, and let the operator resolve the upstream conflict
+           (decommission the VM, renumber one side, etc.).
         """
+        old_obj_type = netbox_ip.assigned_object_type
         old_obj_id = netbox_ip.assigned_object_id
+        new_obj_type = self.assigned_object_type
         new_obj_id = interface.id
+
+        # Case 2: cross-namespace conflict — refuse, don't fabricate.
+        if old_obj_type and old_obj_type != new_obj_type:
+            logging.warning(
+                "IP %s is currently assigned to %s (id %s); host wants it on "
+                "%s/%s. Cross-namespace IP collision — refusing to reassign "
+                "to avoid corrupting the other namespace's record. Resolve "
+                "the upstream conflict (e.g. decommission the VM holding "
+                "this IP, or renumber one side).",
+                netbox_ip.address, old_obj_type, old_obj_id,
+                new_obj_type, getattr(interface, "name", interface.id),
+            )
+            return
+
+        # Case 1: same-namespace iface change — clear primary_ip4 / oob_ip
+        # references on the current owner so NetBox accepts the patch.
         if old_obj_id and old_obj_id != new_obj_id:
             try:
                 current_iface = nb.dcim.interfaces.get(old_obj_id)
