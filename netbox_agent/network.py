@@ -109,6 +109,19 @@ def _get_bridge_members(name):
         return []
 
 
+def _is_sriov_vf_netdev(name):
+    """True iff the netdev is an SR-IOV virtual function.
+
+    sysfs exposes /sys/class/net/<name>/device/physfn as a symlink iff the
+    netdev belongs to a VF; the symlink points back to the parent PF.
+    Mirrors modules._is_sriov_vf (INF-321) for the netdev side — VFs share
+    the PF's wire, so tracking them as separate ifaces is double-counting,
+    and lldpd reporting the same neighbor for VF and PF makes the per-iface
+    cable creation path collide on duplicate terminations.
+    """
+    return os.path.islink(f"/sys/class/net/{name}/device/physfn")
+
+
 # Per-device cache: interface MAC (upper) → nic_module pynetbox object
 _nic_module_cache = {}
 
@@ -444,6 +457,19 @@ class Network(object):
         for interface in os.listdir("/sys/class/net/"):
             # ignore if it's not a link (ie: bonding_masters etc)
             if not os.path.islink("/sys/class/net/{}".format(interface)):
+                continue
+
+            # Skip SR-IOV VFs — they share the PF's wire and shouldn't be
+            # tracked as separate ifaces. lldpd reports the same neighbor
+            # for the VF as for its parent PF, so without this skip the
+            # per-iface cable creation path tries to write a second cable
+            # to the same switch port and fails with HTTP 400 "Duplicate
+            # termination". Existing NetBox VF records get pruned by the
+            # "not present locally" deletion path in
+            # create_or_update_netbox_network_cards. Mirror of
+            # modules._is_sriov_vf (INF-321).
+            if _is_sriov_vf_netdev(interface):
+                logging.debug("Skipping SR-IOV VF: %s", interface)
                 continue
 
             if ignore_re and ignore_re.match(interface):
