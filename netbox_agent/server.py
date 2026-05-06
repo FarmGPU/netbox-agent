@@ -977,11 +977,18 @@ class ServerBase:
         # vmid, last_bmc_seen, managed_by, etc.) — replacing the dict
         # silently dropped them every agent run. Update only the keys the
         # agent owns; preserve everything else.
+        #
+        # Always bump `update` so server.save() below fires this cycle.
+        # last_agent_sync and friends are stamped fresh every run, so a
+        # skipped save loses the heartbeat. Observed on turnip06: once
+        # status_manager transitioned the device to active, no other
+        # tracked field (hostname/serial/platform/status) changed, the
+        # save was skipped, and last_agent_sync stayed at the previous
+        # cycle's value — making status_manager flag the agent STALE
+        # despite the timer firing on schedule.
         existing_cf = dict(server.custom_fields or {})
-        merged_cf = {**existing_cf, **local_cf}
-        if merged_cf != existing_cf:
-            server.custom_fields = merged_cf
-            update += 1
+        server.custom_fields = {**existing_cf, **local_cf}
+        update += 1
 
         # Transition device to "active" on successful agent sync.
         # Only transition from inventory/staged/offline — never override
