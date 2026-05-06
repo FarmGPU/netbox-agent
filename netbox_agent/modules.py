@@ -88,6 +88,23 @@ class ModuleManager:
         "15b3:c2d5",  # Mellanox BlueField-3 SoC management controller
     })
 
+    # Module-type model substrings that mark known orphans from pre-filter
+    # agent runs (INF-321). Their detection paths are gated upstream now,
+    # so any record matching these patterns is permanent zombie state —
+    # never going to be re-detected, never moved to spare cleanly because
+    # serial collisions can confuse the per-category match (see anaheim15
+    # NIC-21 case). Pruned by `_prune_and_renumber_bays` on every cycle.
+    #
+    # Patterns must be specific enough that real hardware cannot match.
+    # Verified via fleet audit 2026-05-06: zero false positives across
+    # ~6000 modules.  Add new patterns only after the same audit.
+    _FILTERED_ORPHAN_PATTERNS = (
+        "Virtual Function",                    # SR-IOV VFs (Mellanox/Intel)
+        "RCEC",                                # PCIe Root Complex Event Collector stubs
+        "C620 Series Chipset Family MROM",     # Intel chipset memory-mapped ROM
+        "PnP device",                          # ACPI/PnP topology artifacts
+    )
+
     @staticmethod
     def _pci_addr_from_businfo(businfo: str) -> str:
         """Extract '0000:41:00.0' from lshw businfo 'pci@0000:41:00.0'."""
@@ -1197,7 +1214,32 @@ class ModuleManager:
             key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
         )
 
-        if len(category_bays) <= detected_count:
+        # Pre-pass: drop bays whose installed module matches a known
+        # filtered-orphan pattern (INF-321 cleanup). These bays look
+        # populated to the standard prune below, which would defensively
+        # preserve them — but their modules will never be re-detected
+        # since the upstream filter ships in `_get_local_nics` /
+        # `_get_local_gpus`, so they're permanent zombies. Delete the
+        # module + bay together; the renumber pass below closes gaps.
+        orphan_bay_ids = set()
+        for bay in category_bays:
+            mod = bay.installed_module
+            if not mod or not mod.module_type:
+                continue
+            model = (mod.module_type.model or "")
+            if any(pat in model for pat in self._FILTERED_ORPHAN_PATTERNS):
+                logger.info(
+                    "Pruning filtered-orphan module '%s' from bay '%s' on '%s' (INF-321)",
+                    model, bay.name, device.name,
+                )
+                _api_retry(mod.delete)
+                _api_retry(bay.delete)
+                orphan_bay_ids.add(bay.id)
+
+        if orphan_bay_ids:
+            category_bays = [b for b in category_bays if b.id not in orphan_bay_ids]
+
+        if len(category_bays) <= detected_count and not orphan_bay_ids:
             return  # Nothing to prune
 
         # Separate populated and empty bays
@@ -1209,7 +1251,7 @@ class ModuleManager:
             else:
                 empty_bays.append(bay)
 
-        excess = len(category_bays) - detected_count
+        excess = max(len(category_bays) - detected_count, 0)
         to_delete = empty_bays[:excess]
 
         for bay in to_delete:
@@ -1219,7 +1261,7 @@ class ModuleManager:
             )
             _api_retry(bay.delete)
 
-        if not to_delete:
+        if not to_delete and not orphan_bay_ids:
             return  # Nothing was pruned, skip renumber
 
         # Renumber remaining bays sequentially
