@@ -8,6 +8,7 @@ module type auto-creation with typed profiles.
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -79,6 +80,55 @@ class ModuleManager:
     # ------------------------------------------------------------------ #
     #  Hardware Detection
     # ------------------------------------------------------------------ #
+
+    # PCI ids of base-class 0x08 (System peripheral) devices we DO want to
+    # enroll despite the topology-stub filter. Format: "vendor:device" lower-hex.
+    # BF3 SoC mgmt is real hardware (sub-BMC) targeted by INF-306.
+    _PCI_STUB_ALLOWLIST = frozenset({
+        "15b3:c2d5",  # Mellanox BlueField-3 SoC management controller
+    })
+
+    @staticmethod
+    def _pci_addr_from_businfo(businfo: str) -> str:
+        """Extract '0000:41:00.0' from lshw businfo 'pci@0000:41:00.0'."""
+        if not businfo:
+            return ""
+        return businfo.split("@", 1)[-1] if "@" in businfo else businfo
+
+    def _is_sriov_vf(self, businfo: str) -> bool:
+        """True iff the PCI device is an SR-IOV virtual function.
+
+        sysfs exposes /sys/bus/pci/devices/<addr>/physfn iff the device is a VF;
+        the symlink points back to the parent physical function. Cleaner than
+        scraping lspci output.
+        """
+        addr = self._pci_addr_from_businfo(businfo)
+        if not addr:
+            return False
+        return os.path.exists(f"/sys/bus/pci/devices/{addr}/physfn")
+
+    def _is_pcie_topology_stub(self, businfo: str) -> bool:
+        """True iff the PCI device is a topology stub with no operational meaning.
+
+        Filters base class 0x08 (System peripheral) — covers Turin RCEC, IOMMU
+        stubs, DMA controllers, etc. Allowlists `_PCI_STUB_ALLOWLIST` so real
+        hardware that happens to use class 0x08 (e.g. BF3 SoC mgmt) survives.
+        """
+        addr = self._pci_addr_from_businfo(businfo)
+        if not addr:
+            return False
+        try:
+            with open(f"/sys/bus/pci/devices/{addr}/class") as f:
+                class_hex = f.read().strip()  # e.g. "0x080700"
+            if not class_hex.lower().startswith("0x08"):
+                return False
+            with open(f"/sys/bus/pci/devices/{addr}/vendor") as f:
+                vendor = f.read().strip().lower().removeprefix("0x")
+            with open(f"/sys/bus/pci/devices/{addr}/device") as f:
+                device = f.read().strip().lower().removeprefix("0x")
+            return f"{vendor}:{device}" not in self._PCI_STUB_ALLOWLIST
+        except (FileNotFoundError, PermissionError, OSError):
+            return False
 
     # Vendor ID normalization (from SILO cpu.py)
     _INTEL_ALIASES = {"genuineintel", "intel", "intel(r) corporation", "intel corporation", "intel corp."}
@@ -218,6 +268,12 @@ class ModuleManager:
             description = gpu.get("description", "")
             businfo = gpu.get("businfo", "")
 
+            # Skip PCIe topology stubs (e.g. AMD Turin RCEC) that lshw lumps in
+            # with display/3D devices. INF-321.
+            if self._is_pcie_topology_stub(businfo):
+                logger.debug("Skipping PCIe topology stub: %s %s (%s)", vendor, product, businfo)
+                continue
+
             # Skip BMC/onboard VGA controllers
             if vendor_lower in self._SKIP_GPU_VENDORS:
                 logger.debug("Skipping onboard VGA: %s %s", vendor, product)
@@ -323,6 +379,11 @@ class ModuleManager:
             vendor = acc.get("vendor", "Unknown")
             businfo = acc.get("businfo", "")
             description = acc.get("description", "")
+
+            # Skip PCIe topology stubs (e.g. AMD Turin RCEC). INF-321.
+            if self._is_pcie_topology_stub(businfo):
+                logger.debug("Skipping PCIe topology stub: %s %s (%s)", vendor, product, businfo)
+                continue
 
             # Get driver info from sysfs
             driver = self._get_driver_for_pci_device(businfo)
@@ -888,6 +949,12 @@ class ModuleManager:
             businfo = iface.get("businfo", "")
 
             if not mac:
+                continue
+
+            # Skip SR-IOV virtual functions — they're software clones of a
+            # parent NIC, not separate hardware. INF-321.
+            if self._is_sriov_vf(businfo):
+                logger.debug("Skipping SR-IOV VF: %s %s (%s)", vendor, product, businfo)
                 continue
 
             # Skip InfiniBand interfaces — GUIDs are longer than Ethernet MACs
