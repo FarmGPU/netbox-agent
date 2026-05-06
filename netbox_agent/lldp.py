@@ -19,7 +19,48 @@ class LLDP:
             self.output = output
         else:
             self.output = subprocess.getoutput("lldpctl -f keyvalue")
+        # Drop non-switch neighbors before parsing. lldpctl's keyvalue format
+        # places every neighbor on the same iface under `lldp.<iface>.*`, and
+        # parse() overwrites earlier blocks with later ones. On hosts with
+        # BlueField-3 / other Smart NICs, the SoC emits its own LLDPDUs
+        # (capability=Station) on internal port representors that the host
+        # iface picks up. If a Station block arrives after the real switch
+        # block, it overwrites it and cabling fails. Keep only Bridge/Router-
+        # capable blocks so switches always win regardless of arrival order
+        # (INF-318).
+        self.output = self._filter_to_switch_neighbors(self.output)
         self.data = self.parse()
+
+    @staticmethod
+    def _filter_to_switch_neighbors(output: str) -> str:
+        """Keep only LLDP neighbor blocks whose chassis advertises Bridge or Router.
+
+        Each neighbor block in lldpctl's keyvalue format starts with a
+        `lldp.<iface>.via=LLDP` line. We accumulate per-block lines, inspect
+        each block's `chassis.Bridge.enabled` / `chassis.Router.enabled` fields,
+        and drop blocks that are not switch-like.
+        """
+        kept: list[str] = []
+        current: list[str] = []
+        is_switch = False
+
+        def flush():
+            nonlocal current, is_switch
+            if current and is_switch:
+                kept.extend(current)
+            current = []
+            is_switch = False
+
+        for line in output.splitlines():
+            if line.endswith(".via=LLDP"):
+                flush()
+            current.append(line)
+            if line.endswith("chassis.Bridge.enabled=on") or line.endswith(
+                "chassis.Router.enabled=on"
+            ):
+                is_switch = True
+        flush()
+        return "\n".join(kept)
 
     def parse(self):
         output_dict = {}
