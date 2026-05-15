@@ -101,6 +101,7 @@ class LSHW:
                 "product": obj.get("product", "Unknown NIC"),
                 "vendor": obj.get("vendor", "Unknown"),
                 "description": obj.get("description", ""),
+                "businfo": obj.get("businfo", ""),
             }
         )
 
