@@ -286,6 +286,21 @@ class LSHW:
         "scsi enclosure",           # Dell storage enclosure managers (Fryer U.2 etc.)
     }
 
+    # Products that look like chipset infrastructure to lshw (class=generic,
+    # description="DMA controller" or "system peripheral") but are actually
+    # real hardware we want enrolled. Matched as case-insensitive substrings
+    # against the lshw `product` field. Vendor must also match the listed
+    # OUI to avoid letting unrelated DMA controllers slip through.
+    _INFRA_DESCRIPTION_EXCEPTIONS = (
+        # Mellanox/NVIDIA BlueField-3 SoC management — PCI 15b3:c2d5, class 0x08.
+        # Real sideband management controller; modules.py allowlist relies
+        # on it surviving this filter so the downstream stub check can fire.
+        # NVIDIA-acquired Mellanox firmware may report either vendor string;
+        # match both.
+        ("mellanox", "bluefield-3 soc management"),
+        ("nvidia",   "bluefield-3 soc management"),
+    )
+
     def find_accelerators(self, obj):
         """Route PCI devices under coprocessor/generic/processing classes.
 
@@ -293,20 +308,38 @@ class LSHW:
         self.gpus — they are general-purpose GPUs regardless of PCI class.
 
         Everything else goes to self.accelerators (Pliops, FPGAs, QAT, etc.).
-        Chipset infrastructure (IOMMU, system peripherals) is filtered out.
+        Chipset infrastructure (IOMMU, system peripherals) is filtered out,
+        except for explicit `_INFRA_DESCRIPTION_EXCEPTIONS` matches.
         """
         if "product" not in obj:
             return
         description = obj.get("description", "").lower()
-        # Skip chipset infrastructure
-        if any(infra in description for infra in self._INFRA_DESCRIPTIONS):
-            return
-
+        product_lower = obj.get("product", "").lower()
         vendor = obj.get("vendor", "Unknown")
         vendor_lower = vendor.lower()
 
-        # Known GPU vendors under non-display PCI classes → route to GPUs
-        if any(gv in vendor_lower for gv in self._GPU_VENDORS):
+        # An explicit description-exception (e.g. BF3 SoC mgmt presents as
+        # "DMA controller") overrides BOTH the infrastructure filter AND
+        # the GPU-vendor routing. Post-Mellanox-acquisition firmware can
+        # report vendor="NVIDIA Corporation" on BF3 SoC mgmt, which would
+        # otherwise get misrouted to self.gpus.
+        is_known_exception = any(
+            v in vendor_lower and p in product_lower
+            for v, p in self._INFRA_DESCRIPTION_EXCEPTIONS
+        )
+
+        # Skip chipset infrastructure, unless this is a known exception.
+        if (
+            not is_known_exception
+            and any(infra in description for infra in self._INFRA_DESCRIPTIONS)
+        ):
+            return
+
+        # Known GPU vendors under non-display PCI classes → route to GPUs,
+        # unless an explicit exception keeps them in accelerators.
+        if not is_known_exception and any(
+            gv in vendor_lower for gv in self._GPU_VENDORS
+        ):
             self.find_gpus(obj)
             return
 
