@@ -1196,6 +1196,65 @@ class ModuleManager:
         )
         return category_bays
 
+    def _prune_filtered_orphans(self, device, category):
+        """Delete bays whose installed module matches a known filtered-
+        orphan pattern, then renumber remaining bays sequentially.
+
+        Independent of state-diff and per-category detection, so it
+        cleans up pre-filter zombies that current detection no longer
+        produces (the agent never enrolls them again → state cache and
+        local detection agree → `_sync_category` is skipped → the
+        inline pre-pass in `_prune_and_renumber_bays` never runs). The
+        C620 MROM bays on the turnip nodes are the canonical example:
+        written by an older PCI walk, invisible to current GPU
+        detection, never reconciled through the diff path.
+
+        Idempotent: returns immediately when no bays match.
+        """
+        prefix = CATEGORIES[category]["prefix"]
+        all_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
+        category_bays = sorted(
+            [b for b in all_bays if b.name.startswith(f"{prefix}-")],
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
+        )
+
+        deleted = False
+        for bay in category_bays:
+            mod = bay.installed_module
+            if not mod or not mod.module_type:
+                continue
+            model = (mod.module_type.model or "")
+            if any(pat in model for pat in self._FILTERED_ORPHAN_PATTERNS):
+                logger.info(
+                    "Pruning filtered-orphan module '%s' from bay '%s' on '%s' (INF-321)",
+                    model, bay.name, device.name,
+                )
+                _api_retry(mod.delete)
+                _api_retry(bay.delete)
+                deleted = True
+
+        if not deleted:
+            return
+
+        # Renumber remaining bays sequentially to close gaps left by
+        # the prune (NIC-0, NIC-1, NIC-3 → NIC-0, NIC-1, NIC-2 when
+        # NIC-2 was the orphan).
+        remaining_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
+        remaining_category = sorted(
+            [b for b in remaining_bays if b.name.startswith(f"{prefix}-")],
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
+        )
+        for i, bay in enumerate(remaining_category):
+            expected_name = f"{prefix}-{i}"
+            if bay.name != expected_name:
+                logger.info(
+                    "Renumbering bay '%s' → '%s' on '%s'",
+                    bay.name, expected_name, device.name,
+                )
+                bay.name = expected_name
+                bay.position = expected_name
+                _api_retry(bay.save)
+
     def _prune_and_renumber_bays(self, device, category, detected_count):
         """
         Remove excess empty bays and renumber remaining bays sequentially.
@@ -1612,6 +1671,16 @@ class ModuleManager:
             return False
 
         logger.info("Starting module sync for device '%s' (id=%d)", self.device.name, self.device.id)
+
+        # Unconditional filtered-orphan sweep — runs before the diff-gated
+        # category loop below, so pre-filter zombies get cleaned even when
+        # local detection has never enrolled them (the C620 MROM / state-
+        # diff-skip case). INF-321.
+        for cat in CATEGORIES:
+            try:
+                self._prune_filtered_orphans(self.device, cat)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Filtered-orphan prune failed for %s: %s", cat, e)
 
         # Skip PSU detection when dmidecode is unavailable
         skip_psu = deps is not None and not deps.get("dmidecode", True)
