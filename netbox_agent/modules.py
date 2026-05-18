@@ -1336,6 +1336,23 @@ class ModuleManager:
 
     def _move_to_spare(self, module, category):
         """Move a module to the SPARE-INVENTORY device."""
+        # Filtered-orphan modules (SR-IOV VFs, PCIe topology stubs, chipset
+        # MROMs, etc.) must never park in SPARE — no future agent run walks
+        # SPARE bays, so anything landing here strands permanently. Delete
+        # instead. The populated-bay pre-pass in _prune_and_renumber_bays
+        # handles the source-device case; this guards the orphan path where
+        # _sync_category routes unmatched modules through _move_to_spare
+        # before the prune fires. INF-321.
+        mt = getattr(module, "module_type", None)
+        model = (getattr(mt, "model", "") or "") if mt else ""
+        if any(pat in model for pat in self._FILTERED_ORPHAN_PATTERNS):
+            logger.info(
+                "Deleting filtered-orphan module '%s' instead of parking in spare (INF-321)",
+                model,
+            )
+            _api_retry(module.delete)
+            return True
+
         spare = self._get_spare_device()
         if not spare:
             logger.error("Cannot move module to spare — spare device not found")
