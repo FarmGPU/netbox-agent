@@ -6,6 +6,8 @@ if "--version" in sys.argv or "-V" in sys.argv:
     print(f"netbox-agent {__version__}")
     sys.exit(0)
 
+import os
+
 from packaging import version
 import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
@@ -16,6 +18,7 @@ from netbox_agent.state import StateManager
 from netbox_agent.vendors.dell import DellHost
 from netbox_agent.vendors.generic import GenericHost
 from netbox_agent.vendors.hp import HPHost
+from netbox_agent.vendors.nvidia import BlueFieldHost
 from netbox_agent.vendors.qct import QCTHost
 from netbox_agent.vendors.supermicro import SupermicroHost
 
@@ -25,8 +28,20 @@ MANUFACTURERS = {
     "HPE": HPHost,
     "Supermicro": SupermicroHost,
     "Quanta Cloud Technology Inc.": QCTHost,
+    "NVIDIA": BlueFieldHost,
     "Generic": GenericHost,
 }
+
+
+def _is_bluefield_dpu():
+    """Detect BlueField BSP by the presence of the OOB management interface.
+
+    The BSP names this interface 'oob_net0' by convention; ordinary host
+    Linux systems do not have it. Used as a fallback when dmidecode
+    Chassis.Manufacturer does not exactly match the MANUFACTURERS dict
+    (the string varies across BSP versions).
+    """
+    return os.path.exists("/sys/class/net/oob_net0")
 
 
 def run(config):
@@ -39,11 +54,14 @@ def run(config):
 
     dmi = dmidecode.parse()
 
-    manufacturer = dmidecode.get_by_type(dmi, "Chassis")[0].get("Manufacturer")
-    try:
-        server = MANUFACTURERS[manufacturer](dmi=dmi)
-    except KeyError:
-        server = GenericHost(dmi=dmi)
+    if _is_bluefield_dpu():
+        server = BlueFieldHost(dmi=dmi)
+    else:
+        manufacturer = dmidecode.get_by_type(dmi, "Chassis")[0].get("Manufacturer")
+        try:
+            server = MANUFACTURERS[manufacturer](dmi=dmi)
+        except KeyError:
+            server = GenericHost(dmi=dmi)
 
     if version.parse(nb.version) < version.parse("3.7"):
         print("netbox-agent is not compatible with Netbox prior to version 3.7")

@@ -174,6 +174,33 @@ def get_config():
         default=None,
         help="Command to read asset tag from hardware (e.g., SMBIOS/FRU)",
     )
+
+    # DPU host-context. Set on BlueField-3 deployments (or any future
+    # DPU class) so the agent can locate its NetBox skeletal record by
+    # parent device_bay when the canonical join keys (serial / asset
+    # tag / cf_bmc_mac_address) are not yet populated on first run.
+    # Non-DPU hosts leave all three unset; behaviour is unchanged.
+    p.add_argument(
+        "--dpu.parent_device",
+        default=None,
+        help="Parent host's NetBox Device name (e.g. anaheim04-100x). "
+             "DPU-only — enables parent+bay fallback lookup.",
+    )
+    p.add_argument(
+        "--dpu.device_bay",
+        default=None,
+        help="Parent host's device_bay name housing this DPU (e.g. DPU-0). "
+             "DPU-only — used with --dpu.parent_device for fallback lookup.",
+    )
+    p.add_argument(
+        "--dpu.netbox_name",
+        default=None,
+        help="Expected NetBox Device name for this DPU "
+             "(e.g. anaheim04-100x-dpu0). DPU-only — overrides "
+             "socket.gethostname() so the agent doesn't rename the record "
+             "to whatever the BSP-default OS hostname happens to be.",
+    )
+
     p.add_argument(
         "--network-only",
         action="store_true",

@@ -1077,10 +1077,21 @@ class ServerBase:
             server.oob_ip = None
             oob_update = True
 
-        # Set oob_ip to the IPMI interface IP
+        # Set oob_ip to any IP attached to a mgmt_only interface (IPMI on
+        # standard servers, oob_net0 on BlueField DPUs, BMC-port on any
+        # future class). The legacy `display == "IPMI"` check is kept as
+        # a fallback for IPs whose nested assigned_object representation
+        # doesn't surface mgmt_only — should be rare, since the agent
+        # itself sets mgmt_only=True on IPMI ifaces it creates.
         if not oob_update:
             for ip in myips:
-                if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
+                if not ip.assigned_object or ip == server.oob_ip:
+                    continue
+                ao = ip.assigned_object
+                is_mgmt = bool(getattr(ao, "mgmt_only", False))
+                if not is_mgmt and getattr(ao, "display", None) == "IPMI":
+                    is_mgmt = True
+                if is_mgmt:
                     server.oob_ip = ip.id
                     oob_update = True
                     break
