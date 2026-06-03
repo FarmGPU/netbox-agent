@@ -83,10 +83,10 @@ class ModuleManager:
 
     # PCI ids of base-class 0x08 (System peripheral) devices we DO want to
     # enroll despite the topology-stub filter. Format: "vendor:device" lower-hex.
-    # BF3 SoC mgmt is real hardware (sub-BMC) targeted by INF-306.
-    _PCI_STUB_ALLOWLIST = frozenset({
-        "15b3:c2d5",  # Mellanox BlueField-3 SoC management controller
-    })
+    # Empty since SW-244: BF3 SoC mgmt is no longer enrolled as a Module
+    # (DPUs are tracked as first-class Devices, role=DPU, per SW-240/SW-241).
+    # Hook retained for future allowlisting needs.
+    _PCI_STUB_ALLOWLIST = frozenset()
 
     # Module-type model substrings that mark known orphans from pre-filter
     # agent runs (INF-321). Their detection paths are gated upstream now,
@@ -103,6 +103,9 @@ class ModuleManager:
         "RCEC",                                # PCIe Root Complex Event Collector stubs
         "C620 Series Chipset Family MROM",     # Intel chipset memory-mapped ROM
         "PnP device",                          # ACPI/PnP topology artifacts
+        "BlueField-3 integrated ConnectX-7",   # mt-92 — chassis-host NIC artifact (SW-244)
+        "BlueField-3 SoC Management",          # mt-309 — chassis-host accelerator artifact (SW-244)
+        "BlueField-3 DPU",                     # mt-170 — legacy SW-122 artifact (SW-244)
     )
 
     @staticmethod
@@ -985,6 +988,14 @@ class ModuleManager:
             vendor_lower = vendor.lower()
             if any(gv in vendor_lower for gv in self._GPU_AS_NIC_VENDORS):
                 logger.debug("Skipping GPU-as-NIC: %s %s", vendor, product)
+                continue
+
+            # Skip BlueField NICs — DPUs are tracked as Devices (role=DPU),
+            # not Modules. See SW-240 / SW-241. Broad "bluefield" substring
+            # catches BF3 + future BF generations without per-model maintenance.
+            product_lower = (product or "").lower()
+            if "bluefield" in product_lower:
+                logger.debug("Skipping BlueField NIC: %s %s (%s)", vendor, product, businfo)
                 continue
 
             # Group by PCI card — strip function number to get card identity

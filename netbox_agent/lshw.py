@@ -292,15 +292,11 @@ class LSHW:
     # real hardware we want enrolled. Matched as case-insensitive substrings
     # against the lshw `product` field. Vendor must also match the listed
     # OUI to avoid letting unrelated DMA controllers slip through.
-    _INFRA_DESCRIPTION_EXCEPTIONS = (
-        # Mellanox/NVIDIA BlueField-3 SoC management — PCI 15b3:c2d5, class 0x08.
-        # Real sideband management controller; modules.py allowlist relies
-        # on it surviving this filter so the downstream stub check can fire.
-        # NVIDIA-acquired Mellanox firmware may report either vendor string;
-        # match both.
-        ("mellanox", "bluefield-3 soc management"),
-        ("nvidia",   "bluefield-3 soc management"),
-    )
+    # Empty since SW-244: BF3 SoC mgmt is no longer enrolled as a Module
+    # (DPUs are first-class Devices per SW-240/SW-241). any() over an empty
+    # tuple returns False, so is_known_exception is always False and the
+    # standard infra filter fires normally.
+    _INFRA_DESCRIPTION_EXCEPTIONS = ()
 
     def find_accelerators(self, obj):
         """Route PCI devices under coprocessor/generic/processing classes.
