@@ -1481,6 +1481,46 @@ class ServerNetwork(Network):
                 switch_ip,
             )
         )
+        # Defensive: the switch interface may already have a cable that the
+        # server-side check at create_or_update_cable() didn't see. Two cases:
+        #   (a) Orphan cable (one side missing terminations) — delete it and
+        #       proceed to create a fresh, fully-terminated cable.
+        #   (b) Valid cable to a different host — log error and return without
+        #       creating. NetBox would 400 on a duplicate termination otherwise,
+        #       crashing the whole agent run.
+        # Refetch via nb.dcim.cables.get() to be sure terminations are loaded.
+        existing_ref = nb_switch_interface.cable
+        if existing_ref is not None:
+            existing = nb.dcim.cables.get(existing_ref.id)
+            a_term = list(existing.a_terminations or [])
+            b_term = list(existing.b_terminations or [])
+            if not a_term or not b_term:
+                logging.warning(
+                    "Switch interface {sw_iface} (id={sw_iface_id}) on {sw_ip} "
+                    "has orphaned cable {cable_id} "
+                    "(a_terminations={a}, b_terminations={b}) — deleting before recable".format(
+                        sw_iface=switch_interface,
+                        sw_iface_id=nb_switch_interface.id,
+                        sw_ip=switch_ip,
+                        cable_id=existing.id,
+                        a=len(a_term),
+                        b=len(b_term),
+                    )
+                )
+                existing.delete()
+            else:
+                logging.error(
+                    "Switch interface {sw_iface} on {sw_ip} is already cabled "
+                    "(cable {cable_id}) to another fully-terminated endpoint — "
+                    "skipping recable from {host_iface} to avoid NetBox 400 "
+                    "duplicate-termination crash. Resolve the conflict manually.".format(
+                        sw_iface=switch_interface,
+                        sw_ip=switch_ip,
+                        cable_id=existing.id,
+                        host_iface=nb_server_interface.name,
+                    )
+                )
+                return nb_server_interface
         cable = nb.dcim.cables.create(
             a_terminations=[
                 {"object_type": "dcim.interface", "object_id": nb_server_interface.id},
