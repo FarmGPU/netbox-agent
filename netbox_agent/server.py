@@ -638,7 +638,10 @@ class ServerBase:
 
         # Validate: must be exactly 4 alphanumeric chars, not a placeholder
         if tag and tag not in _ASSET_TAG_PLACEHOLDERS and _ASSET_TAG_RE.match(tag):
-            return tag.upper()
+            # Asset tags are lowercase base36 by convention — matches the
+            # allocator in netbox-workers (enrollment/asset_tag.py) and the
+            # existing fleet in NetBox. Do NOT uppercase.
+            return tag.lower()
         return None
 
     def get_netbox_server(self, expansion=False):
@@ -844,13 +847,28 @@ class ServerBase:
             server.asset_tag = local_asset_tag
             server.save()
         elif local_asset_tag and existing_tag and local_asset_tag != existing_tag:
-            logging.warning(
-                "Asset tag mismatch on '%s': NetBox=%s, local=%s "
-                "(keeping NetBox value — BMC API is authoritative)",
-                server.name,
-                existing_tag,
-                local_asset_tag,
-            )
+            if local_asset_tag.lower() == existing_tag.lower():
+                # Same tag, different case only — normalize to the lowercase
+                # convention. This is NOT the FRU/Redfish-divergence case the
+                # warning below guards against; it just heals legacy uppercase
+                # values (e.g. tags written before get_asset_tag stopped
+                # uppercasing). Tag identity is unchanged.
+                logging.info(
+                    "Normalizing asset_tag case on '%s': %s -> %s",
+                    server.name,
+                    existing_tag,
+                    local_asset_tag,
+                )
+                server.asset_tag = local_asset_tag
+                server.save()
+            else:
+                logging.warning(
+                    "Asset tag mismatch on '%s': NetBox=%s, local=%s "
+                    "(keeping NetBox value — BMC API is authoritative)",
+                    server.name,
+                    existing_tag,
+                    local_asset_tag,
+                )
 
         logging.debug("Updating Server...")
 
