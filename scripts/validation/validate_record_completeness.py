@@ -105,11 +105,13 @@ def run(nb):
             device_complete += 1
         else:
             device_incomplete += 1
-            device_issues.append({
-                "name": device.name,
-                "missing_required": missing,
-                "missing_preferred": preferred_missing,
-            })
+            device_issues.append(
+                {
+                    "name": device.name,
+                    "missing_required": missing,
+                    "missing_preferred": preferred_missing,
+                }
+            )
 
     # Module validation
     module_complete = 0
@@ -132,11 +134,13 @@ def run(nb):
             module_complete += 1
         else:
             module_incomplete += 1
-            module_issues.append({
-                "id": module.id,
-                "serial": module.serial,
-                "missing_required": missing,
-            })
+            module_issues.append(
+                {
+                    "id": module.id,
+                    "serial": module.serial,
+                    "missing_required": missing,
+                }
+            )
 
     # Print summary
     total_devices = len(devices)
@@ -172,7 +176,9 @@ def run(nb):
         print(f"\nINCOMPLETE MODULES ({len(module_issues)}):")
         print("-" * 70)
         for issue in module_issues[:50]:
-            print(f"  Module {issue['id']} (serial={issue['serial']}): missing {issue['missing_required']}")
+            print(
+                f"  Module {issue['id']} (serial={issue['serial']}): missing {issue['missing_required']}"
+            )
         if len(module_issues) > 50:
             print(f"  ... and {len(module_issues) - 50} more")
 

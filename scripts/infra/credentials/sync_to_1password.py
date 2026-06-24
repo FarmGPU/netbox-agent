@@ -57,18 +57,19 @@ VAULT_DEFAULT = "Employee"
 
 # Item title template
 TITLES = {
-    ("pdu", "default"):          "PDU — Default Credentials",
-    ("pdu", "farmgpu"):          "PDU — FarmGPU Credentials",
-    ("compute-bmc", "default"):  "Compute BMC — Default Credentials",
-    ("compute-bmc", "farmgpu"):  "Compute BMC — FarmGPU Credentials",
-    ("switches", "default"):     "Switches — Default Credentials",
-    ("switches", "farmgpu"):     "Switches — FarmGPU Credentials",
+    ("pdu", "default"): "PDU — Default Credentials",
+    ("pdu", "farmgpu"): "PDU — FarmGPU Credentials",
+    ("compute-bmc", "default"): "Compute BMC — Default Credentials",
+    ("compute-bmc", "farmgpu"): "Compute BMC — FarmGPU Credentials",
+    ("switches", "default"): "Switches — Default Credentials",
+    ("switches", "farmgpu"): "Switches — FarmGPU Credentials",
 }
 
 
 # ── CSV loading ──────────────────────────────────────────────────────────────
 # Each loader returns list of (asset_tag, user, password) tuples.
 # Only entries WITH an asset_tag are included.
+
 
 def load_pdu_credentials(path):
     """Load PDU credentials for entries with asset tags."""
@@ -169,6 +170,7 @@ def classify_credentials(entries):
 
 # ── 1Password item generation ────────────────────────────────────────────────
 
+
 def escape_op_field(s):
     """Escape periods, equals signs, and backslashes for op field names."""
     s = s.replace("\\", "\\\\")
@@ -248,7 +250,9 @@ def create_or_update_item(title, vault, domain, cred_type, entries, dry_run=Fals
 
     # Build op command
     cmd = [
-        "op", "item", "create",
+        "op",
+        "item",
+        "create",
         "--category=Secure Note",
         f"--vault={vault}",
         f"--title={title}",
@@ -262,8 +266,9 @@ def create_or_update_item(title, vault, domain, cred_type, entries, dry_run=Fals
         if result.returncode == 0:
             item_id = json.loads(result.stdout).get("id", "")
             if item_id:
-                subprocess.run(["op", "item", "delete", item_id, f"--vault={vault}"],
-                               capture_output=True)
+                subprocess.run(
+                    ["op", "item", "delete", item_id, f"--vault={vault}"], capture_output=True
+                )
                 print(f"    Deleted existing item {item_id} for recreation.")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -279,6 +284,7 @@ def create_or_update_item(title, vault, domain, cred_type, entries, dry_run=Fals
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Sync infrastructure credentials to 1Password",
@@ -288,17 +294,22 @@ examples:
   %(prog)s --dry-run                    # preview (no op signin needed)
   %(prog)s --vault=Employee             # create items
   %(prog)s --vault=Employee --update    # replace existing items
-""")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="preview items without creating them")
-    parser.add_argument("--vault", default=VAULT_DEFAULT,
-                        help=f"1Password vault name (default: {VAULT_DEFAULT})")
-    parser.add_argument("--update", action="store_true",
-                        help="delete and recreate existing items")
+""",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="preview items without creating them"
+    )
+    parser.add_argument(
+        "--vault", default=VAULT_DEFAULT, help=f"1Password vault name (default: {VAULT_DEFAULT})"
+    )
+    parser.add_argument("--update", action="store_true", help="delete and recreate existing items")
     parser.add_argument("--pdu-csv", default=PDU_CSV)
     parser.add_argument("--compute-csv", default=COMPUTE_CSV)
-    parser.add_argument("--machines-csv", default=MACHINES_CSV,
-                        help="OEM BMC credentials from machines_validated.csv")
+    parser.add_argument(
+        "--machines-csv",
+        default=MACHINES_CSV,
+        help="OEM BMC credentials from machines_validated.csv",
+    )
     parser.add_argument("--switches-csv", default=SWITCHES_CSV)
     args = parser.parse_args()
 
@@ -306,8 +317,9 @@ examples:
         print("=== DRY RUN — no 1Password changes ===\n")
     else:
         # Verify op is signed in
-        result = subprocess.run(["op", "vault", "list", "--format=json"],
-                                capture_output=True, text=True)
+        result = subprocess.run(
+            ["op", "vault", "list", "--format=json"], capture_output=True, text=True
+        )
         if result.returncode != 0:
             print("ERROR: Not signed in to 1Password. Run: op signin")
             sys.exit(1)
@@ -329,8 +341,10 @@ examples:
     machines_all = load_machines_credentials(args.machines_csv)
     switch_all = load_switch_credentials(args.switches_csv)
 
-    print(f"\nLoaded: {len(pdu_all)} PDU, {len(compute_all)} compute, "
-          f"{len(machines_all)} machines OEM, {len(switch_all)} switch credentials (with asset tags)")
+    print(
+        f"\nLoaded: {len(pdu_all)} PDU, {len(compute_all)} compute, "
+        f"{len(machines_all)} machines OEM, {len(switch_all)} switch credentials (with asset tags)"
+    )
 
     # Merge machines OEM creds into compute — these are all ADMIN/default.
     # Deduplicate by asset_tag: if the same tag exists in both compute_all
@@ -351,22 +365,27 @@ examples:
         ("switches", "farmgpu", switch_farmgpu),
     ]
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Items to create:")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     all_ok = True
     for domain, cred_type, entries in items:
         title = TITLES[(domain, cred_type)]
         ok = create_or_update_item(
-            title, args.vault, domain, cred_type, entries,
-            dry_run=args.dry_run, update=args.update,
+            title,
+            args.vault,
+            domain,
+            cred_type,
+            entries,
+            dry_run=args.dry_run,
+            update=args.update,
         )
         if not ok:
             all_ok = False
 
     if args.dry_run:
-        print(f"\n=== DRY RUN complete ===")
+        print("\n=== DRY RUN complete ===")
     else:
         status = "All items created." if all_ok else "Some items failed."
         print(f"\n{status}")

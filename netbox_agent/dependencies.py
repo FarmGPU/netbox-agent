@@ -13,14 +13,14 @@ logger = logging.getLogger("netbox_agent.dependencies")
 
 # tool_name -> (description, required)
 TOOLS = {
-    "dmidecode":  ("DMI/SMBIOS data (serial, chassis, PSUs, DIMMs)", True),
-    "lshw":       ("Hardware tree (GPUs, NICs, storage fallback)", True),
-    "lsblk":      ("Block device enumeration (primary storage)", False),
-    "lscpu":      ("CPU socket detection (primary CPU path)", False),
-    "ipmitool":   ("IPMI/BMC data (OOB IP, MAC, asset tag)", False),
-    "ethtool":    ("NIC speed/duplex detection", False),
-    "lldpctl":    ("LLDP neighbor discovery (auto-cabling)", False),
-    "nvme":       ("NVMe device enrichment (vendor, firmware)", False),
+    "dmidecode": ("DMI/SMBIOS data (serial, chassis, PSUs, DIMMs)", True),
+    "lshw": ("Hardware tree (GPUs, NICs, storage fallback)", True),
+    "lsblk": ("Block device enumeration (primary storage)", False),
+    "lscpu": ("CPU socket detection (primary CPU path)", False),
+    "ipmitool": ("IPMI/BMC data (OOB IP, MAC, asset tag)", False),
+    "ethtool": ("NIC speed/duplex detection", False),
+    "lldpctl": ("LLDP neighbor discovery (auto-cabling)", False),
+    "nvme": ("NVMe device enrichment (vendor, firmware)", False),
     "nvidia-smi": ("NVIDIA GPU serial numbers", False),
 }
 

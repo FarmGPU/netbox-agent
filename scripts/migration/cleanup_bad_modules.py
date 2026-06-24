@@ -42,7 +42,9 @@ def main():
     for mod in all_modules:
         mt_model = mod.module_type.model if mod.module_type else ""
         if mt_model in BAD_MODULE_TYPE_MODELS:
-            print(f"DELETE module id={mod.id} bay={mod.module_bay.name} type={mt_model} device={mod.device.name}")
+            print(
+                f"DELETE module id={mod.id} bay={mod.module_bay.name} type={mt_model} device={mod.device.name}"
+            )
             if not dry:
                 mod.delete()
             deleted_modules += 1
@@ -76,7 +78,9 @@ def main():
                 idx = bay.name.split("-")[1]
                 try:
                     if int(idx) >= 2:
-                        print(f"DELETE module_bay id={bay.id} name={bay.name} device={device.name}")
+                        print(
+                            f"DELETE module_bay id={bay.id} name={bay.name} device={device.name}"
+                        )
                         if not dry:
                             bay.delete()
                         deleted_bays += 1

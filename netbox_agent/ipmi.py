@@ -29,9 +29,7 @@ class IPMI:
             return
 
         for ch in _CHANNELS:
-            ret, output = subprocess.getstatusoutput(
-                f"ipmitool lan print {ch}"
-            )
+            ret, output = subprocess.getstatusoutput(f"ipmitool lan print {ch}")
             if ret != 0:
                 continue
 
@@ -41,9 +39,7 @@ class IPMI:
                 self.output = output
                 self.channel = ch
                 ip = self._extract_field(output, "IP Address") or "0.0.0.0"
-                logger.debug(
-                    "IPMI: valid response on channel %d (MAC=%s, IP=%s)", ch, mac, ip
-                )
+                logger.debug("IPMI: valid response on channel %d (MAC=%s, IP=%s)", ch, mac, ip)
                 break
         else:
             logger.warning("IPMI: no valid response on channels %s", _CHANNELS)
@@ -81,7 +77,9 @@ class IPMI:
         if ip and ip != "0.0.0.0":
             ip_list = [f"{ip}/32"]
         else:
-            logger.info("IPMI: MAC=%s but IP unassigned (0.0.0.0) — interface created without IP", mac)
+            logger.info(
+                "IPMI: MAC=%s but IP unassigned (0.0.0.0) — interface created without IP", mac
+            )
 
         return {
             "name": "IPMI",

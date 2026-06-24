@@ -40,7 +40,9 @@ def _get_or_create_manufacturer(nb, name):
         slug = re.sub(r"[^A-Za-z0-9]+", "-", name).lower().strip("-")
         mfr = nb.dcim.manufacturers.get(slug=slug)
         if mfr:
-            logger.info("Manufacturer '%s' found by slug '%s' (actual name='%s')", name, slug, mfr.name)
+            logger.info(
+                "Manufacturer '%s' found by slug '%s' (actual name='%s')", name, slug, mfr.name
+            )
         else:
             mfr = nb.dcim.manufacturers.create(name=name, slug=slug)
             logger.info("Created manufacturer '%s'", name)
@@ -53,11 +55,13 @@ def _get_or_create_device_type(nb, manufacturer, model):
     dt = nb.dcim.device_types.get(manufacturer_id=manufacturer.id, model=model)
     if not dt:
         slug = re.sub(r"[^A-Za-z0-9]+", "-", model).lower().strip("-")
-        dt = nb.dcim.device_types.create({
-            "manufacturer": manufacturer.id,
-            "model": model,
-            "slug": slug,
-        })
+        dt = nb.dcim.device_types.create(
+            {
+                "manufacturer": manufacturer.id,
+                "model": model,
+                "slug": slug,
+            }
+        )
         logger.info("Created device type '%s'", model)
     else:
         logger.info("Device type '%s' already exists", model)
@@ -70,11 +74,13 @@ def _get_or_create_device_type(nb, manufacturer, model):
         for i in range(count):
             bay_name = f"{category}-{i}"
             if bay_name not in existing_names:
-                nb.dcim.module_bay_templates.create({
-                    "device_type": dt.id,
-                    "name": bay_name,
-                    "position": bay_name,
-                })
+                nb.dcim.module_bay_templates.create(
+                    {
+                        "device_type": dt.id,
+                        "name": bay_name,
+                        "position": bay_name,
+                    }
+                )
                 created += 1
     if created > 0:
         logger.info("Created %d module bay templates on '%s'", created, model)
@@ -86,11 +92,13 @@ def _get_or_create_device_role(nb, name):
     slug = re.sub(r"[^A-Za-z0-9]+", "-", name).lower().strip("-")
     role = nb.dcim.device_roles.get(slug=slug)
     if not role:
-        role = nb.dcim.device_roles.create({
-            "name": name,
-            "slug": slug,
-            "vm_role": False,
-        })
+        role = nb.dcim.device_roles.create(
+            {
+                "name": name,
+                "slug": slug,
+                "vm_role": False,
+            }
+        )
         logger.info("Created device role '%s'", name)
     else:
         logger.info("Device role '%s' already exists", name)
@@ -113,27 +121,31 @@ def run(nb):
     if existing:
         logger.info("Device '%s' already exists (id=%d)", DEVICE_NAME, existing.id)
     else:
-        device = nb.dcim.devices.create({
-            "name": DEVICE_NAME,
-            "device_type": device_type.id,
-            "role": device_role.id,
-            "site": site.id,
-            "status": "inventory",
-            "custom_fields": {
-                "owner": "FarmGPU",
-            },
-        })
+        device = nb.dcim.devices.create(
+            {
+                "name": DEVICE_NAME,
+                "device_type": device_type.id,
+                "role": device_role.id,
+                "site": site.id,
+                "status": "inventory",
+                "custom_fields": {
+                    "owner": "FarmGPU",
+                },
+            }
+        )
         logger.info("Created device '%s' (id=%d)", DEVICE_NAME, device.id)
 
         # Backfill module bays on the device
         templates = list(nb.dcim.module_bay_templates.filter(device_type_id=device_type.id))
         created = 0
         for t in templates:
-            nb.dcim.module_bays.create({
-                "device": device.id,
-                "name": t.name,
-                "position": t.name,
-            })
+            nb.dcim.module_bays.create(
+                {
+                    "device": device.id,
+                    "name": t.name,
+                    "position": t.name,
+                }
+            )
             created += 1
         logger.info("Created %d module bays on '%s'", created, DEVICE_NAME)
 

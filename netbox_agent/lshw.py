@@ -193,13 +193,22 @@ class LSHW:
     # These are IOMMU, host bridges, system peripherals, etc. that lshw
     # classifies as "generic" but are not compute accelerators.
     _INFRA_DESCRIPTIONS = {
-        "iommu", "system peripheral", "generic system peripheral",
-        "non-essential instrumentation", "encryption controller",
-        "host bridge", "pci bridge", "isa bridge", "smi bridge",
-        "signal processing controller", "communication controller",
-        "pic", "dma controller", "timer",
-        "performance counters",     # Intel CPU uncore PMU counters
-        "scsi enclosure",           # Dell storage enclosure managers (Fryer U.2 etc.)
+        "iommu",
+        "system peripheral",
+        "generic system peripheral",
+        "non-essential instrumentation",
+        "encryption controller",
+        "host bridge",
+        "pci bridge",
+        "isa bridge",
+        "smi bridge",
+        "signal processing controller",
+        "communication controller",
+        "pic",
+        "dma controller",
+        "timer",
+        "performance counters",  # Intel CPU uncore PMU counters
+        "scsi enclosure",  # Dell storage enclosure managers (Fryer U.2 etc.)
     }
 
     def find_accelerators(self, obj):
@@ -227,13 +236,15 @@ class LSHW:
             return
 
         # Everything else is a true accelerator (Pliops, FPGA, custom hardware)
-        self.accelerators.append({
-            "product": obj.get("product", "Unknown Accelerator"),
-            "vendor": vendor,
-            "description": obj.get("description", ""),
-            "businfo": obj.get("businfo", ""),
-            "class": obj.get("class", ""),
-        })
+        self.accelerators.append(
+            {
+                "product": obj.get("product", "Unknown Accelerator"),
+                "vendor": vendor,
+                "description": obj.get("description", ""),
+                "businfo": obj.get("businfo", ""),
+                "class": obj.get("class", ""),
+            }
+        )
 
     # PCI device classes that indicate compute accelerators (not CPUs, not GPUs)
     _ACCELERATOR_CLASSES = {"coprocessor", "generic", "processing"}

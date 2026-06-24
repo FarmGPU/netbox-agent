@@ -10,7 +10,6 @@ from netbox_agent.dependencies import check_all, get_missing, missing_deps_strin
 
 
 class TestDependencies:
-
     def test_check_all_with_all_available(self):
         """All tools present → all True."""
         with patch("netbox_agent.dependencies.which", return_value="/usr/bin/fake"):
@@ -20,6 +19,7 @@ class TestDependencies:
 
     def test_check_all_with_missing_tools(self):
         """Some tools missing → mixed True/False."""
+
         def mock_which(name):
             return "/usr/bin/fake" if name in ("dmidecode", "lshw") else None
 
@@ -32,6 +32,7 @@ class TestDependencies:
 
     def test_get_missing_returns_correct_list(self):
         """get_missing() returns only missing tool names."""
+
         def mock_which(name):
             return "/usr/bin/fake" if name in ("dmidecode", "lshw", "lsblk") else None
 

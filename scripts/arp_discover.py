@@ -46,19 +46,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 SUBNETS = {
     "10.100.200.0/24": {
-        "pivot": "10.100.200.44",       # hickory09
+        "pivot": "10.100.200.44",  # hickory09
         "name": "mgmt-200 (storage/compute)",
     },
     "10.100.208.0/24": {
-        "pivot": "10.100.208.40",       # anaheim14
+        "pivot": "10.100.208.40",  # anaheim14
         "name": "mgmt-208 (GPU servers)",
     },
     "10.100.10.0/24": {
-        "pivot": "10.100.10.56",        # tyan-milan-1
+        "pivot": "10.100.10.56",  # tyan-milan-1
         "name": "mgmt-10 (infrastructure)",
     },
     "192.168.211.0/24": {
-        "pivot": "192.168.211.36",      # bell01 (via jump host)
+        "pivot": "192.168.211.36",  # bell01 (via jump host)
         "name": "mgmt-211 (legacy GPU)",
         "jump": "fgpu@10.100.191.46",
     },
@@ -71,11 +71,16 @@ SSH_KEYS = [
 ]
 SSH_USER = "fgpu"
 SSH_OPTS = [
-    "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "ConnectTimeout=10",
-    "-o", "LogLevel=ERROR",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "LogLevel=ERROR",
 ]
 
 # NetBox
@@ -140,9 +145,7 @@ ip neigh show | grep -v FAILED | grep -v INCOMPLETE | awk '{{print $1, $5}}'
     cmd = _ssh_cmd(pivot_host, remote_script, jump=jump)
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             logger.error("SSH to %s failed: %s", pivot_host, result.stderr.strip())
             return []
@@ -176,6 +179,7 @@ def load_netbox_data():
     try:
         import pynetbox
         import urllib3
+
         urllib3.disable_warnings()
     except ImportError:
         logger.warning("pynetbox not installed — skipping NetBox cross-reference")
@@ -184,14 +188,12 @@ def load_netbox_data():
     token = NETBOX_TOKEN
     if not token:
         # Try to read from deploy script
-        deploy_script = os.path.join(
-            os.path.dirname(__file__), "deploy_and_run.sh"
-        )
+        deploy_script = os.path.join(os.path.dirname(__file__), "deploy_and_run.sh")
         if os.path.exists(deploy_script):
             with open(deploy_script) as f:
                 for line in f:
                     if line.startswith("NETBOX_TOKEN="):
-                        token = line.split("=", 1)[1].strip().strip('"\'')
+                        token = line.split("=", 1)[1].strip().strip("\"'")
                         break
 
     if not token:
@@ -205,7 +207,7 @@ def load_netbox_data():
 
     # Build MAC → device mapping from interfaces
     mac_to_device = {}  # MAC → {device_name, device_id, iface_name, primary_ip}
-    device_info = {}    # device_id → {name, serial, primary_ip, bmc_mac}
+    device_info = {}  # device_id → {name, serial, primary_ip, bmc_mac}
 
     devices = list(nb.dcim.devices.filter(status="active", role_id=2))
     for dev in devices:
@@ -236,7 +238,11 @@ def load_netbox_data():
 
 def identify_host(ip, jump=None):
     """Try to SSH into a discovered IP and get hostname + serial."""
-    cmd = _ssh_cmd(ip, "hostname -f 2>/dev/null; sudo dmidecode -s system-serial-number 2>/dev/null || echo UNKNOWN", jump=jump)
+    cmd = _ssh_cmd(
+        ip,
+        "hostname -f 2>/dev/null; sudo dmidecode -s system-serial-number 2>/dev/null || echo UNKNOWN",
+        jump=jump,
+    )
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if result.returncode == 0:
@@ -250,23 +256,25 @@ def identify_host(ip, jump=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="ARP-based host discovery for NetBox population"
-    )
+    parser = argparse.ArgumentParser(description="ARP-based host discovery for NetBox population")
     parser.add_argument(
-        "--subnet", "-s",
+        "--subnet",
+        "-s",
         help="Specific subnet to scan (e.g., 10.100.200.0/24). Default: all configured.",
     )
     parser.add_argument(
-        "--csv", action="store_true",
+        "--csv",
+        action="store_true",
         help="Output results as CSV",
     )
     parser.add_argument(
-        "--identify", action="store_true",
+        "--identify",
+        action="store_true",
         help="Try SSH into unknown hosts to get hostname/serial",
     )
     parser.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="Output results as JSON",
     )
     args = parser.parse_args()
@@ -345,8 +353,16 @@ def main():
     if args.csv:
         writer = csv.DictWriter(
             sys.stdout,
-            fieldnames=["subnet", "ip", "mac", "nb_match", "nb_device", "nb_device_ip",
-                        "ssh_hostname", "ssh_serial"],
+            fieldnames=[
+                "subnet",
+                "ip",
+                "mac",
+                "nb_match",
+                "nb_device",
+                "nb_device_ip",
+                "ssh_hostname",
+                "ssh_serial",
+            ],
             extrasaction="ignore",
         )
         writer.writeheader()
@@ -358,9 +374,11 @@ def main():
     known = [r for r in all_results if r.get("nb_match")]
     unknown = [r for r in all_results if not r.get("nb_match")]
 
-    print(f"\n{'='*110}")
-    print(f"ARP Discovery Results — {len(all_results)} hosts found across {len(targets)} subnet(s)")
-    print(f"{'='*110}")
+    print(f"\n{'=' * 110}")
+    print(
+        f"ARP Discovery Results — {len(all_results)} hosts found across {len(targets)} subnet(s)"
+    )
+    print(f"{'=' * 110}")
 
     if known:
         print(f"\n--- KNOWN DEVICES ({len(known)}) — matched in NetBox ---")
@@ -373,8 +391,10 @@ def main():
                 ip_status = " ← MISSING IN NB"
             elif nb_ip != r["ip"]:
                 ip_status = f" ← MISMATCH (ARP={r['ip']})"
-            print(f"  {r['ip']:<16} {r['mac']:<19} {r.get('nb_match',''):<10} "
-                  f"{r.get('nb_device',''):<45} {nb_ip}{ip_status}")
+            print(
+                f"  {r['ip']:<16} {r['mac']:<19} {r.get('nb_match', ''):<10} "
+                f"{r.get('nb_device', ''):<45} {nb_ip}{ip_status}"
+            )
 
     if unknown:
         print(f"\n--- UNKNOWN DEVICES ({len(unknown)}) — NOT in NetBox ---")
@@ -387,14 +407,14 @@ def main():
 
     # Summary
     missing_ip = [r for r in known if not r.get("nb_device_ip")]
-    print(f"\n{'='*110}")
-    print(f"Summary:")
+    print(f"\n{'=' * 110}")
+    print("Summary:")
     print(f"  Total discovered:          {len(all_results)}")
     print(f"  Matched in NetBox:         {len(known)}")
     print(f"  Unknown (not in NetBox):   {len(unknown)}")
     if missing_ip:
         print(f"  Known but MISSING mgmt IP: {len(missing_ip)} ← can be populated now")
-    print(f"{'='*110}")
+    print(f"{'=' * 110}")
 
 
 if __name__ == "__main__":

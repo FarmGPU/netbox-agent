@@ -44,12 +44,14 @@ DEFAULT_OWNER = "FarmGPU"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def normalize_mac(mac: str) -> str:
     """Strip separators and lowercase: '3C:EC:EF:33:8C:EC' → '3cecef338cec'."""
     return re.sub(r"[:.\-]", "", mac).lower().strip()
 
 
 # ── Phase 1: Load CSV ────────────────────────────────────────────────────────
+
 
 def load_hostnames_csv(path):
     """
@@ -106,20 +108,23 @@ def load_hostnames_csv(path):
                 skipped += 1
                 continue
 
-            entries.append({
-                "row": row_num,
-                "hostname": hostname,
-                "full_hostname": row[2].strip(),
-                "asset_tag": asset_tag,
-                "serial": serial,
-                "macs": macs,
-                "hostname_variants": hostname_variants,
-            })
+            entries.append(
+                {
+                    "row": row_num,
+                    "hostname": hostname,
+                    "full_hostname": row[2].strip(),
+                    "asset_tag": asset_tag,
+                    "serial": serial,
+                    "macs": macs,
+                    "hostname_variants": hostname_variants,
+                }
+            )
 
     return entries, skipped
 
 
 # ── Phase 2: Match to NetBox ─────────────────────────────────────────────────
+
 
 def load_netbox_devices(nb):
     """Load all devices from target roles with their MACs, serial, and name."""
@@ -136,14 +141,16 @@ def load_netbox_devices(nb):
                 if iface.mac_address:
                     dev_macs.add(normalize_mac(str(iface.mac_address)))
 
-            devices.append({
-                "id": dev.id,
-                "name": dev.name or "",
-                "serial": dev.serial or "",
-                "asset_tag": dev.asset_tag or "",
-                "owner": (dev.custom_fields or {}).get("owner", ""),
-                "macs": dev_macs,
-            })
+            devices.append(
+                {
+                    "id": dev.id,
+                    "name": dev.name or "",
+                    "serial": dev.serial or "",
+                    "asset_tag": dev.asset_tag or "",
+                    "owner": (dev.custom_fields or {}).get("owner", ""),
+                    "macs": dev_macs,
+                }
+            )
 
     return devices
 
@@ -221,9 +228,12 @@ def match_csv_to_netbox(csv_entries, mac_index, serial_index, name_index):
             logger.warning(
                 "CONFLICT: CSV '%s' (tag=%s) matches NB device '%s' (id=%d) "
                 "already claimed by CSV '%s' (tag=%s) — skipping",
-                label, entry["asset_tag"],
-                matched_dev["name"], dev_id,
-                prior_label, prior["asset_tag"],
+                label,
+                entry["asset_tag"],
+                matched_dev["name"],
+                dev_id,
+                prior_label,
+                prior["asset_tag"],
             )
             unmatched.append(entry)
             continue
@@ -240,6 +250,7 @@ def match_csv_to_netbox(csv_entries, mac_index, serial_index, name_index):
 
 
 # ── Phase 3: NetBox update ───────────────────────────────────────────────────
+
 
 def _get_api_session():
     """
@@ -260,11 +271,13 @@ def _get_api_session():
 
     session = requests.Session()
     session.verify = ssl_verify
-    session.headers.update({
-        "Authorization": f"Token {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    })
+    session.headers.update(
+        {
+            "Authorization": f"Token {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    )
     return session, url
 
 
@@ -299,9 +312,9 @@ def update_device_asset_tag(device_id, device_name, asset_tag, owner, dry_run):
 
 def run_netbox_updates(matches, dry_run):
     """Phase 3: Update asset_tags in NetBox for matched entries."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Phase 3: NetBox asset tag updates")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     successes = 0
     failures = 0
@@ -316,12 +329,15 @@ def run_netbox_updates(matches, dry_run):
 
         if current_tag == csv_tag:
             already_set += 1
-            print(f"  [SKIP] {label:<45} tag={csv_tag:<6} "
-                  f"NB='{nb_name}' — Already set")
+            print(f"  [SKIP] {label:<45} tag={csv_tag:<6} NB='{nb_name}' — Already set")
             continue
 
         ok, msg = update_device_asset_tag(
-            nb_dev["id"], nb_name, csv_tag, nb_dev["owner"], dry_run,
+            nb_dev["id"],
+            nb_name,
+            csv_tag,
+            nb_dev["owner"],
+            dry_run,
         )
         if ok:
             successes += 1
@@ -331,22 +347,26 @@ def run_netbox_updates(matches, dry_run):
             status = "FAIL"
 
         current_str = f"'{current_tag}'" if current_tag else "none"
-        print(f"  [{status}] {label:<45} tag={csv_tag:<6} "
-              f"NB='{nb_name}' (was {current_str}) {msg}")
+        print(
+            f"  [{status}] {label:<45} tag={csv_tag:<6} NB='{nb_name}' (was {current_str}) {msg}"
+        )
 
     total = successes + failures + already_set
-    print(f"\nResults: {successes} updated, {already_set} already set, "
-          f"{failures} failed (of {total} matched)")
+    print(
+        f"\nResults: {successes} updated, {already_set} already set, "
+        f"{failures} failed (of {total} matched)"
+    )
     return failures == 0
 
 
 # ── Phase 4: Post-update verification ────────────────────────────────────────
 
+
 def run_post_verification(nb, matches):
     """Re-read each updated device by ID and confirm asset_tag matches."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Phase 4: Post-update verification")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     ok_count = 0
     fail_count = 0
@@ -370,12 +390,12 @@ def run_post_verification(nb, matches):
             print(f"  FAIL  {label:<45} expected='{expected_tag}' got='{actual_tag}'")
             fail_count += 1
 
-    print(f"\nVerification: {ok_count} OK, {fail_count} failed "
-          f"(of {len(matches)} total)")
+    print(f"\nVerification: {ok_count} OK, {fail_count} failed (of {len(matches)} total)")
     return fail_count == 0
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -388,23 +408,30 @@ examples:
   %(prog)s --filter potato --dry-run    # preview potato nodes only
   %(prog)s --filter potato              # program potato nodes only
   %(prog)s --hostnames-csv /custom.csv  # custom CSV path
-""")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="show what would change, don't write to NetBox")
-    parser.add_argument("--filter",
-                        help="only process entries whose friendly name, hostname, "
-                             "or full hostname contains this substring (case-insensitive)")
-    parser.add_argument("--hostnames-csv", default=HOSTNAMES_CSV,
-                        help=f"path to hostnames.csv (default: {HOSTNAMES_CSV})")
+""",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="show what would change, don't write to NetBox"
+    )
+    parser.add_argument(
+        "--filter",
+        help="only process entries whose friendly name, hostname, "
+        "or full hostname contains this substring (case-insensitive)",
+    )
+    parser.add_argument(
+        "--hostnames-csv",
+        default=HOSTNAMES_CSV,
+        help=f"path to hostnames.csv (default: {HOSTNAMES_CSV})",
+    )
     args = parser.parse_args()
 
     if args.dry_run:
         print("=== DRY RUN — no changes will be made ===\n")
 
     # ── Phase 1 ──────────────────────────────────────────────────────────
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print("Phase 1: Loading CSV data")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  hostnames.csv: {args.hostnames_csv}")
 
     csv_entries, skip_count = load_hostnames_csv(args.hostnames_csv)
@@ -416,7 +443,8 @@ examples:
     if args.filter:
         pattern = args.filter.lower()
         csv_entries = [
-            e for e in csv_entries
+            e
+            for e in csv_entries
             if pattern in (e["hostname"] or "").lower()
             or pattern in (e["full_hostname"] or "").lower()
             or any(pattern in v for v in e["hostname_variants"])
@@ -428,9 +456,9 @@ examples:
         return
 
     # ── Phase 2 ──────────────────────────────────────────────────────────
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Phase 2: Matching CSV entries to NetBox devices")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     nb = get_api()
     print(f"\n  Loading devices from roles: {', '.join(DEVICE_ROLES)}...")
@@ -438,11 +466,11 @@ examples:
     print(f"  Loaded {len(nb_devices)} NetBox devices")
 
     mac_index, serial_index, name_index = build_match_indexes(nb_devices)
-    print(f"  Indexes: {len(mac_index)} MACs, {len(serial_index)} serials, "
-          f"{len(name_index)} names")
+    print(
+        f"  Indexes: {len(mac_index)} MACs, {len(serial_index)} serials, {len(name_index)} names"
+    )
 
-    matches, unmatched = match_csv_to_netbox(csv_entries, mac_index,
-                                             serial_index, name_index)
+    matches, unmatched = match_csv_to_netbox(csv_entries, mac_index, serial_index, name_index)
 
     # Report match methods
     method_counts = {}
@@ -460,8 +488,7 @@ examples:
         for entry in unmatched:
             label = entry["hostname"] or entry["full_hostname"]
             macs_str = ", ".join(entry["macs"][:1]) if entry["macs"] else "none"
-            print(f"    {label:<45} tag={entry['asset_tag']:<6} "
-                  f"mac={macs_str}")
+            print(f"    {label:<45} tag={entry['asset_tag']:<6} mac={macs_str}")
 
     if not matches:
         print("\nNo matches found. Nothing to update.")

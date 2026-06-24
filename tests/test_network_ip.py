@@ -19,10 +19,16 @@ from itertools import islice
 # ---------------------------------------------------------------------------
 _mock_nb = MagicMock(name="nb")
 _mock_config = SimpleNamespace(
-    update_all=True, update_network=True, register=False,
+    update_all=True,
+    update_network=True,
+    register=False,
     network=SimpleNamespace(
-        ignore_interfaces="(dummy.*|docker.*)", ignore_ips="^(127\\.0\\.0\\..*)",
-        ipmi=False, lldp=None, nic_id="name", primary_mac="temp",
+        ignore_interfaces="(dummy.*|docker.*)",
+        ignore_ips="^(127\\.0\\.0\\..*)",
+        ipmi=False,
+        lldp=None,
+        nic_id="name",
+        primary_mac="temp",
     ),
 )
 _mock_config_module = MagicMock()
@@ -68,7 +74,8 @@ def _run_ip_unassignment(device, nb_nics, netbox_ips, all_local_ips, nb_api):
 
                 logging.info(
                     "Unassigning IP %s from %s",
-                    netbox_ip.address, netbox_ip.assigned_object,
+                    netbox_ip.address,
+                    netbox_ip.assigned_object,
                 )
                 netbox_ip.assigned_object_type = None
                 netbox_ip.assigned_object_id = None
@@ -80,6 +87,7 @@ def _run_ip_unassignment(device, nb_nics, netbox_ips, all_local_ips, nb_api):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_ip(ip_id, address):
     ip = MagicMock(name=f"ip-{ip_id}")
@@ -108,6 +116,7 @@ def _make_nic(nic_id):
 # ---------------------------------------------------------------------------
 # Tests — these verify the fix logic directly
 # ---------------------------------------------------------------------------
+
 
 class TestPrimaryIp4ClearingBeforeUnassign:
     """Test that primary_ip4 is cleared before unassigning IPs."""
@@ -153,7 +162,7 @@ class TestPrimaryIp4ClearingBeforeUnassign:
         When unassigning an IP that is NOT the device's primary, no clearing occurs.
         """
         primary_ip = _make_ip(42, "10.100.200.50/24")  # this is primary
-        other_ip = _make_ip(99, "10.100.200.60/24")     # this will be unassigned
+        other_ip = _make_ip(99, "10.100.200.60/24")  # this will be unassigned
         device = _make_device(1, "potato01", primary_ip4=primary_ip)
 
         nb_api = MagicMock(name="nb_api")

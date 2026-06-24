@@ -47,7 +47,9 @@ def _get_modules_by_device(nb, device_id):
     for mod in all_modules:
         bay_name = ""
         if mod.module_bay:
-            bay_name = getattr(mod.module_bay, "name", "") or getattr(mod.module_bay, "display", "")
+            bay_name = getattr(mod.module_bay, "name", "") or getattr(
+                mod.module_bay, "display", ""
+            )
         for category in TAG_TO_CATEGORY.values():
             if bay_name.startswith(f"{category}-"):
                 result[category]["count"] += 1

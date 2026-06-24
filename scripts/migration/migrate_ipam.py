@@ -36,6 +36,7 @@ DST_TOKEN = "nbt_iKGuMp3OpEse.8O1M1A2PAgUJduwIhnpDZnAmgDxpRT9DVvftSj6o"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 class IdMapper:
     """Track old_id → new_id mappings across migration phases."""
 
@@ -121,6 +122,7 @@ def connect():
 # Phase 1: Tags
 # ---------------------------------------------------------------------------
 
+
 def migrate_tags(src, dst, mapper, dry_run):
     stats = PhaseStats("Tags")
     print("\n" + "=" * 60)
@@ -165,6 +167,7 @@ def migrate_tags(src, dst, mapper, dry_run):
 # Phase 2: Tenant Groups
 # ---------------------------------------------------------------------------
 
+
 def migrate_tenant_groups(src, dst, mapper, dry_run):
     stats = PhaseStats("Tenant Groups")
     print("\n" + "=" * 60)
@@ -207,6 +210,7 @@ def migrate_tenant_groups(src, dst, mapper, dry_run):
 # ---------------------------------------------------------------------------
 # Phase 3: Tenants
 # ---------------------------------------------------------------------------
+
 
 def migrate_tenants(src, dst, mapper, dry_run):
     stats = PhaseStats("Tenants")
@@ -257,6 +261,7 @@ def migrate_tenants(src, dst, mapper, dry_run):
 # Phase 4: RIRs
 # ---------------------------------------------------------------------------
 
+
 def migrate_rirs(src, dst, mapper, dry_run):
     stats = PhaseStats("RIRs")
     print("\n" + "=" * 60)
@@ -300,6 +305,7 @@ def migrate_rirs(src, dst, mapper, dry_run):
 # ---------------------------------------------------------------------------
 # Phase 5: Aggregates
 # ---------------------------------------------------------------------------
+
 
 def migrate_aggregates(src, dst, mapper, dry_run):
     stats = PhaseStats("Aggregates")
@@ -347,6 +353,7 @@ def migrate_aggregates(src, dst, mapper, dry_run):
 # Phase 6: IPAM Roles
 # ---------------------------------------------------------------------------
 
+
 def migrate_roles(src, dst, mapper, dry_run):
     stats = PhaseStats("IPAM Roles")
     print("\n" + "=" * 60)
@@ -391,6 +398,7 @@ def migrate_roles(src, dst, mapper, dry_run):
 # Phase 7: VLANs  (101 source → merge with 4 existing bare VLANs)
 # ---------------------------------------------------------------------------
 
+
 def migrate_vlans(src, dst, mapper, dry_run):
     stats = PhaseStats("VLANs")
     print("\n" + "=" * 60)
@@ -422,7 +430,8 @@ def migrate_vlans(src, dst, mapper, dry_run):
                     if dry_run:
                         logger.info(
                             "[DRY RUN] Would update VLAN %d '%s' with source data",
-                            vlan.vid, vlan.name,
+                            vlan.vid,
+                            vlan.name,
                         )
                     else:
                         match.name = vlan.name
@@ -476,6 +485,7 @@ def migrate_vlans(src, dst, mapper, dry_run):
 # Phase 8: VRFs + Route Targets
 # ---------------------------------------------------------------------------
 
+
 def migrate_vrfs(src, dst, mapper, dry_run):
     stats = PhaseStats("VRFs")
     print("\n" + "=" * 60)
@@ -496,9 +506,7 @@ def migrate_vrfs(src, dst, mapper, dry_run):
                 if dry_run:
                     logger.info("[DRY RUN] Would create route target '%s'", rt.name)
                     continue
-                new = dst.ipam.route_targets.create(
-                    name=rt.name, description=rt.description or ""
-                )
+                new = dst.ipam.route_targets.create(name=rt.name, description=rt.description or "")
                 mapper.set("route_targets", rt.id, new.id)
                 logger.info("Created route target '%s'", rt.name)
             except Exception as e:
@@ -549,6 +557,7 @@ def migrate_vrfs(src, dst, mapper, dry_run):
 # Phase 9: Prefixes  (sorted by prefix length — containers before children)
 # ---------------------------------------------------------------------------
 
+
 def migrate_prefixes(src, dst, mapper, dry_run):
     stats = PhaseStats("Prefixes")
     print("\n" + "=" * 60)
@@ -556,9 +565,7 @@ def migrate_prefixes(src, dst, mapper, dry_run):
     print("=" * 60)
 
     src_prefixes = list(src.ipam.prefixes.all())
-    src_prefixes.sort(
-        key=lambda p: ipaddress.ip_network(p.prefix, strict=False).prefixlen
-    )
+    src_prefixes.sort(key=lambda p: ipaddress.ip_network(p.prefix, strict=False).prefixlen)
     print(f"  Source: {len(src_prefixes)} (sorted by prefix length)")
 
     for pfx in src_prefixes:
@@ -585,7 +592,8 @@ def migrate_prefixes(src, dst, mapper, dry_run):
             if dry_run:
                 logger.info(
                     "[DRY RUN] Would create prefix '%s' (status=%s)",
-                    pfx.prefix, _status_val(pfx.status),
+                    pfx.prefix,
+                    _status_val(pfx.status),
                 )
                 stats.created += 1
                 continue
@@ -619,7 +627,9 @@ def migrate_prefixes(src, dst, mapper, dry_run):
                 logger.info("  ... %d / %d prefixes created", stats.created, len(src_prefixes))
             logger.info(
                 "Created prefix '%s' (id=%d, status=%s)",
-                pfx.prefix, new.id, data["status"],
+                pfx.prefix,
+                new.id,
+                data["status"],
             )
         except Exception as e:
             stats.failed += 1
@@ -632,6 +642,7 @@ def migrate_prefixes(src, dst, mapper, dry_run):
 # ---------------------------------------------------------------------------
 # Phase 10: IP Ranges
 # ---------------------------------------------------------------------------
+
 
 def migrate_ip_ranges(src, dst, mapper, dry_run):
     stats = PhaseStats("IP Ranges")
@@ -653,14 +664,16 @@ def migrate_ip_ranges(src, dst, mapper, dry_run):
                 stats.skipped += 1
                 logger.info(
                     "IP range %s–%s exists, skipped",
-                    ipr.start_address, ipr.end_address,
+                    ipr.start_address,
+                    ipr.end_address,
                 )
                 continue
 
             if dry_run:
                 logger.info(
                     "[DRY RUN] Would create IP range %s–%s",
-                    ipr.start_address, ipr.end_address,
+                    ipr.start_address,
+                    ipr.end_address,
                 )
                 stats.created += 1
                 continue
@@ -691,13 +704,17 @@ def migrate_ip_ranges(src, dst, mapper, dry_run):
             stats.created += 1
             logger.info(
                 "Created IP range %s–%s (id=%d)",
-                ipr.start_address, ipr.end_address, new.id,
+                ipr.start_address,
+                ipr.end_address,
+                new.id,
             )
         except Exception as e:
             stats.failed += 1
             logger.error(
                 "Failed IP range %s–%s: %s",
-                ipr.start_address, ipr.end_address, e,
+                ipr.start_address,
+                ipr.end_address,
+                e,
             )
 
     stats.print_summary()
@@ -707,6 +724,7 @@ def migrate_ip_ranges(src, dst, mapper, dry_run):
 # ---------------------------------------------------------------------------
 # Verify-only mode
 # ---------------------------------------------------------------------------
+
 
 def verify(src, dst):
     print("\n" + "=" * 60)
@@ -752,6 +770,7 @@ def verify(src, dst):
 # ---------------------------------------------------------------------------
 # Pre-populate mapper (for --phase N single-phase runs)
 # ---------------------------------------------------------------------------
+
 
 def _prepopulate_mapper(src, dst, mapper, up_to_phase):
     """Match existing dest objects to source IDs for phases before up_to_phase."""
@@ -825,19 +844,22 @@ PHASES = {
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Migrate IPAM data from old NetBox to new NetBox"
-    )
+    parser = argparse.ArgumentParser(description="Migrate IPAM data from old NetBox to new NetBox")
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Preview migration without writing to destination",
     )
     parser.add_argument(
-        "--verify-only", action="store_true",
+        "--verify-only",
+        action="store_true",
         help="Compare source vs destination counts and report gaps",
     )
     parser.add_argument(
-        "--phase", type=int, choices=range(1, 11), metavar="N",
+        "--phase",
+        type=int,
+        choices=range(1, 11),
+        metavar="N",
         help="Run only phase N (1–10)",
     )
     args = parser.parse_args()
@@ -879,8 +901,7 @@ def main():
     total_u = sum(s.updated for s in all_stats)
     total_s = sum(s.skipped for s in all_stats)
     total_f = sum(s.failed for s in all_stats)
-    print(f"\n  TOTAL: {total_c} created, {total_u} updated,"
-          f" {total_s} skipped, {total_f} failed")
+    print(f"\n  TOTAL: {total_c} created, {total_u} updated, {total_s} skipped, {total_f} failed")
 
     if total_f:
         print(f"\n  WARNING: {total_f} failures — review log output above")

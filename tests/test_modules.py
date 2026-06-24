@@ -38,20 +38,33 @@ _mock_config = SimpleNamespace(
     force_disk_refresh=False,
     dump_disks_map=None,
     log_level="debug",
-    netbox=SimpleNamespace(url="http://test", token="test", ssl_verify=True, ssl_ca_certs_file=None),
-    virtual=SimpleNamespace(enabled=False, cluster_name=None, hypervisor=False, list_guests_cmd=None),
+    netbox=SimpleNamespace(
+        url="http://test", token="test", ssl_verify=True, ssl_ca_certs_file=None
+    ),
+    virtual=SimpleNamespace(
+        enabled=False, cluster_name=None, hypervisor=False, list_guests_cmd=None
+    ),
     device=SimpleNamespace(
-        platform=None, tags="", custom_fields="", blade_role="Blade",
-        chassis_role="Server Chassis", server_role="Server",
-        default_owner="FarmGPU", asset_tag_cmd=None,
+        platform=None,
+        tags="",
+        custom_fields="",
+        blade_role="Blade",
+        chassis_role="Server Chassis",
+        server_role="Server",
+        default_owner="FarmGPU",
+        asset_tag_cmd=None,
     ),
     tenant=SimpleNamespace(driver=None, driver_file=None, regex=None),
     datacenter_location=SimpleNamespace(driver=None, driver_file=None, regex=None),
     rack_location=SimpleNamespace(driver=None, driver_file=None, regex=None),
     slot_location=SimpleNamespace(driver=None, driver_file=None, regex=None),
     network=SimpleNamespace(
-        ignore_interfaces="(dummy.*|docker.*)", ignore_ips="^(127\\.0\\.0\\..*)",
-        ipmi=True, lldp=None, nic_id="name", primary_mac="temp",
+        ignore_interfaces="(dummy.*|docker.*)",
+        ignore_ips="^(127\\.0\\.0\\..*)",
+        ipmi=True,
+        lldp=None,
+        nic_id="name",
+        primary_mac="temp",
     ),
 )
 
@@ -74,12 +87,13 @@ _mock_misc.get_vendor = MagicMock(return_value="Unknown")
 sys.modules["netbox_agent.misc"] = _mock_misc
 
 # Now we can safely import
-from netbox_agent.modules import ModuleManager, CATEGORIES
+from netbox_agent.modules import ModuleManager, CATEGORIES  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(autouse=True)
 def reset_nb_mock():
@@ -142,8 +156,8 @@ def mm(mock_server, mock_lshw):
 # Tests: Hardware Detection
 # ---------------------------------------------------------------------------
 
-class TestModuleManagerDetection:
 
+class TestModuleManagerDetection:
     def test_get_local_cpus_lscpu(self, mm, mock_lshw):
         """CPU detection via lscpu (primary path, informed by SILO cpu.py)."""
         lscpu_data = {
@@ -156,9 +170,9 @@ class TestModuleManagerDetection:
                 {"field": "Thread(s) per core:", "data": "2"},
             ]
         }
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output",
-                   return_value=json.dumps(lscpu_data)):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", return_value=json.dumps(lscpu_data)
+        ):
             cpus = mm._get_local_cpus()
         assert len(cpus) == 2
         assert cpus[0]["product"] == "Intel(R) Xeon(R) Gold 6430"
@@ -175,9 +189,9 @@ class TestModuleManagerDetection:
                 {"field": "Vendor ID:", "data": "AuthenticAMD"},
             ]
         }
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output",
-                   return_value=json.dumps(lscpu_data)):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", return_value=json.dumps(lscpu_data)
+        ):
             cpus = mm._get_local_cpus()
         assert len(cpus) == 2
         assert cpus[0]["vendor"] == "AMD"  # normalized from AuthenticAMD
@@ -192,9 +206,9 @@ class TestModuleManagerDetection:
                 {"field": "Vendor ID:", "data": "GenuineIntel"},
             ]
         }
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output",
-                   return_value=json.dumps(lscpu_data)):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", return_value=json.dumps(lscpu_data)
+        ):
             cpus = mm._get_local_cpus()
         # lscpu reports exactly 2 sockets — no QAT noise
         assert len(cpus) == 2
@@ -205,8 +219,12 @@ class TestModuleManagerDetection:
         mock_lshw.get_hw_linux.return_value = [
             {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU0"},
             {"product": "Xeon Gold 6430", "vendor": "Intel", "location": "CPU1"},
-            {"product": "C62x Chipset QuickAssist Technology", "vendor": "Intel",
-             "description": "Co-processor", "location": ""},
+            {
+                "product": "C62x Chipset QuickAssist Technology",
+                "vendor": "Intel",
+                "description": "Co-processor",
+                "location": "",
+            },
             {"product": "4xxx Series QAT", "vendor": "Intel Corporation", "description": ""},
             {"product": "Intel Corporation", "vendor": "Intel Corporation", "description": ""},
         ]
@@ -231,8 +249,9 @@ class TestModuleManagerDetection:
             {"product": "A100 80GB SXM4", "vendor": "NVIDIA", "description": "3D"},
         ]
         nvidia_output = "0, 1324821038475\n1, 1324821038476"
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output", return_value=nvidia_output):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", return_value=nvidia_output
+        ):
             gpus = mm._get_local_gpus()
         assert len(gpus) == 2
         assert gpus[0]["serial"] == "1324821038475"
@@ -240,10 +259,22 @@ class TestModuleManagerDetection:
 
     def test_get_local_dimms(self, mm, mock_lshw):
         mock_lshw.memories = [
-            {"product": "M393A8G40AB2-CWE", "vendor": "Samsung", "serial": "ABC123",
-             "slot": "DIMM_A1", "size": 64, "description": "DDR4"},
-            {"product": "M393A8G40AB2-CWE", "vendor": "Samsung", "serial": "Not Specified",
-             "slot": "DIMM_A2", "size": 64, "description": "DDR4"},
+            {
+                "product": "M393A8G40AB2-CWE",
+                "vendor": "Samsung",
+                "serial": "ABC123",
+                "slot": "DIMM_A1",
+                "size": 64,
+                "description": "DDR4",
+            },
+            {
+                "product": "M393A8G40AB2-CWE",
+                "vendor": "Samsung",
+                "serial": "Not Specified",
+                "slot": "DIMM_A2",
+                "size": 64,
+                "description": "DDR4",
+            },
         ]
         dimms = mm._get_local_dimms()
         assert len(dimms) == 2
@@ -254,26 +285,72 @@ class TestModuleManagerDetection:
         """Storage detection via lsblk (primary path)."""
         lsblk_data = {
             "blockdevices": [
-                {"name": "nvme0n1", "type": "disk", "size": 3840755982336,
-                 "model": "D7-P5520", "serial": "SSD123", "vendor": None,
-                 "tran": "nvme", "rota": "0", "hctl": None, "rev": "V1.0"},
-                {"name": "sda", "type": "disk", "size": 960197124096,
-                 "model": "Samsung SSD 870", "serial": "SSD456", "vendor": "ATA",
-                 "tran": "sata", "rota": "0", "hctl": "0:0:0:0", "rev": "2B6Q"},
-                {"name": "sdb", "type": "disk", "size": 4000787030016,
-                 "model": "ST4000NM000A", "serial": "HDD789", "vendor": "ATA",
-                 "tran": "sata", "rota": "1", "hctl": "1:0:0:0", "rev": None},
-                {"name": "loop0", "type": "loop", "size": 0,
-                 "model": None, "serial": None, "vendor": None,
-                 "tran": None, "rota": "0", "hctl": None, "rev": None},
-                {"name": "dm-0", "type": "disk", "size": 107374182400,
-                 "model": None, "serial": None, "vendor": None,
-                 "tran": None, "rota": "0", "hctl": None, "rev": None},
+                {
+                    "name": "nvme0n1",
+                    "type": "disk",
+                    "size": 3840755982336,
+                    "model": "D7-P5520",
+                    "serial": "SSD123",
+                    "vendor": None,
+                    "tran": "nvme",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": "V1.0",
+                },
+                {
+                    "name": "sda",
+                    "type": "disk",
+                    "size": 960197124096,
+                    "model": "Samsung SSD 870",
+                    "serial": "SSD456",
+                    "vendor": "ATA",
+                    "tran": "sata",
+                    "rota": "0",
+                    "hctl": "0:0:0:0",
+                    "rev": "2B6Q",
+                },
+                {
+                    "name": "sdb",
+                    "type": "disk",
+                    "size": 4000787030016,
+                    "model": "ST4000NM000A",
+                    "serial": "HDD789",
+                    "vendor": "ATA",
+                    "tran": "sata",
+                    "rota": "1",
+                    "hctl": "1:0:0:0",
+                    "rev": None,
+                },
+                {
+                    "name": "loop0",
+                    "type": "loop",
+                    "size": 0,
+                    "model": None,
+                    "serial": None,
+                    "vendor": None,
+                    "tran": None,
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
+                {
+                    "name": "dm-0",
+                    "type": "disk",
+                    "size": 107374182400,
+                    "model": None,
+                    "serial": None,
+                    "vendor": None,
+                    "tran": None,
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
             ]
         }
 
-        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
-             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, patch(
+            "netbox_agent.modules.subprocess.check_output"
+        ) as mock_subprocess:
             mock_is_tool.side_effect = lambda t: t in ("lsblk",)
             mock_subprocess.return_value = json.dumps(lsblk_data)
             ssds = mm._get_local_ssds()
@@ -295,20 +372,35 @@ class TestModuleManagerDetection:
         """NVMe devices should be enriched with nvme-cli data when available."""
         lsblk_data = {
             "blockdevices": [
-                {"name": "nvme0n1", "type": "disk", "size": 3840755982336,
-                 "model": "D7-P5520", "serial": "SSD-NVM1", "vendor": None,
-                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+                {
+                    "name": "nvme0n1",
+                    "type": "disk",
+                    "size": 3840755982336,
+                    "model": "D7-P5520",
+                    "serial": "SSD-NVM1",
+                    "vendor": None,
+                    "tran": "nvme",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
             ]
         }
         nvme_data = {
             "Devices": [
-                {"DevicePath": "/dev/nvme0n1", "ModelNumber": "Solidigm D7-P5520",
-                 "SerialNumber": "SSD-NVM1", "Vendor": "Solidigm",
-                 "PhysicalSize": 3840755982336, "Firmware": "V1.2.3"},
+                {
+                    "DevicePath": "/dev/nvme0n1",
+                    "ModelNumber": "Solidigm D7-P5520",
+                    "SerialNumber": "SSD-NVM1",
+                    "Vendor": "Solidigm",
+                    "PhysicalSize": 3840755982336,
+                    "Firmware": "V1.2.3",
+                },
             ]
         }
 
         call_count = [0]
+
         def mock_check_output(cmd, **kwargs):
             call_count[0] += 1
             if "lsblk" in cmd:
@@ -317,8 +409,9 @@ class TestModuleManagerDetection:
                 return json.dumps(nvme_data)
             raise FileNotFoundError(cmd[0])
 
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output", side_effect=mock_check_output):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", side_effect=mock_check_output
+        ):
             ssds = mm._get_local_ssds()
 
         assert len(ssds) == 1
@@ -328,12 +421,19 @@ class TestModuleManagerDetection:
     def test_get_local_ssds_lshw_fallback(self, mm, mock_lshw):
         """Falls back to lshw when lsblk is not available."""
         mock_lshw.get_hw_linux.return_value = [
-            {"product": "D7-P5520", "vendor": "Solidigm", "serial": "SSD123",
-             "description": "NVMe disk"},
-            {"product": None, "vendor": None, "serial": "SSD456",
-             "description": "NVMe disk"},
-            {"product": "Virtual disk", "vendor": None, "serial": "VD001",
-             "description": "Virtual volume"},
+            {
+                "product": "D7-P5520",
+                "vendor": "Solidigm",
+                "serial": "SSD123",
+                "description": "NVMe disk",
+            },
+            {"product": None, "vendor": None, "serial": "SSD456", "description": "NVMe disk"},
+            {
+                "product": "Virtual disk",
+                "vendor": None,
+                "serial": "VD001",
+                "description": "Virtual volume",
+            },
         ]
         with patch("netbox_agent.modules.is_tool", return_value=False):
             ssds = mm._get_local_ssds()
@@ -344,17 +444,36 @@ class TestModuleManagerDetection:
         """Duplicate serials should be deduplicated."""
         lsblk_data = {
             "blockdevices": [
-                {"name": "nvme0n1", "type": "disk", "size": 100000,
-                 "model": "TestDrive", "serial": "DUP-SERIAL", "vendor": "Test",
-                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
-                {"name": "nvme1n1", "type": "disk", "size": 100000,
-                 "model": "TestDrive", "serial": "DUP-SERIAL", "vendor": "Test",
-                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+                {
+                    "name": "nvme0n1",
+                    "type": "disk",
+                    "size": 100000,
+                    "model": "TestDrive",
+                    "serial": "DUP-SERIAL",
+                    "vendor": "Test",
+                    "tran": "nvme",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
+                {
+                    "name": "nvme1n1",
+                    "type": "disk",
+                    "size": 100000,
+                    "model": "TestDrive",
+                    "serial": "DUP-SERIAL",
+                    "vendor": "Test",
+                    "tran": "nvme",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
             ]
         }
 
-        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
-             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, patch(
+            "netbox_agent.modules.subprocess.check_output"
+        ) as mock_subprocess:
             mock_is_tool.side_effect = lambda t: t == "lsblk"
             mock_subprocess.return_value = json.dumps(lsblk_data)
             ssds = mm._get_local_ssds()
@@ -365,17 +484,36 @@ class TestModuleManagerDetection:
         """Vendor should be guessed from model when not provided by lsblk."""
         lsblk_data = {
             "blockdevices": [
-                {"name": "nvme0n1", "type": "disk", "size": 100000,
-                 "model": "Samsung SSD 990 PRO", "serial": "S1", "vendor": None,
-                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
-                {"name": "sda", "type": "disk", "size": 100000,
-                 "model": "Solidigm D7-PS1010", "serial": "S2", "vendor": None,
-                 "tran": "sata", "rota": "0", "hctl": None, "rev": None},
+                {
+                    "name": "nvme0n1",
+                    "type": "disk",
+                    "size": 100000,
+                    "model": "Samsung SSD 990 PRO",
+                    "serial": "S1",
+                    "vendor": None,
+                    "tran": "nvme",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
+                {
+                    "name": "sda",
+                    "type": "disk",
+                    "size": 100000,
+                    "model": "Solidigm D7-PS1010",
+                    "serial": "S2",
+                    "vendor": None,
+                    "tran": "sata",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
             ]
         }
 
-        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
-             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, patch(
+            "netbox_agent.modules.subprocess.check_output"
+        ) as mock_subprocess:
             mock_is_tool.side_effect = lambda t: t == "lsblk"
             mock_subprocess.return_value = json.dumps(lsblk_data)
             ssds = mm._get_local_ssds()
@@ -385,12 +523,27 @@ class TestModuleManagerDetection:
 
     def test_get_local_nics(self, mm, mock_lshw):
         mock_lshw.interfaces = [
-            {"product": "E810-XXVDA2", "vendor": "Intel", "serial": "aa:bb:cc:dd:ee:01",
-             "name": "eno1", "description": "Ethernet"},
-            {"product": "E810-XXVDA2", "vendor": "Intel", "serial": "aa:bb:cc:dd:ee:02",
-             "name": "eno2", "description": "Ethernet"},
-            {"product": "E810-XXVDA2", "vendor": "Intel", "serial": "aa:bb:cc:dd:ee:01",
-             "name": "eno1v1", "description": "Ethernet"},
+            {
+                "product": "E810-XXVDA2",
+                "vendor": "Intel",
+                "serial": "aa:bb:cc:dd:ee:01",
+                "name": "eno1",
+                "description": "Ethernet",
+            },
+            {
+                "product": "E810-XXVDA2",
+                "vendor": "Intel",
+                "serial": "aa:bb:cc:dd:ee:02",
+                "name": "eno2",
+                "description": "Ethernet",
+            },
+            {
+                "product": "E810-XXVDA2",
+                "vendor": "Intel",
+                "serial": "aa:bb:cc:dd:ee:01",
+                "name": "eno1v1",
+                "description": "Ethernet",
+            },
         ]
         nics = mm._get_local_nics()
         assert len(nics) == 2
@@ -444,8 +597,8 @@ class TestModuleManagerDetection:
 # Tests: Module Type Resolution
 # ---------------------------------------------------------------------------
 
-class TestModuleManagerTypeResolution:
 
+class TestModuleManagerTypeResolution:
     def test_resolve_existing_module_type(self, mm, nb):
         mock_mfr = MagicMock(id=10, name="Intel")
         nb.dcim.manufacturers.get.return_value = mock_mfr
@@ -484,8 +637,8 @@ class TestModuleManagerTypeResolution:
 # Tests: Module Bay Management
 # ---------------------------------------------------------------------------
 
-class TestModuleManagerBayManagement:
 
+class TestModuleManagerBayManagement:
     def test_ensure_module_bays_creates_missing(self, mm, nb):
         device = SimpleNamespace(id=1, name="test-server")
 
@@ -508,8 +661,8 @@ class TestModuleManagerBayManagement:
 # Tests: Core Sync Algorithm
 # ---------------------------------------------------------------------------
 
-class TestModuleManagerSync:
 
+class TestModuleManagerSync:
     def test_sync_creates_new_modules(self, mm, nb):
         device = SimpleNamespace(id=1, name="test-server")
         mm.device = device
@@ -586,8 +739,8 @@ class TestModuleManagerSync:
 # Tests: create_or_update Entry Point
 # ---------------------------------------------------------------------------
 
-class TestModuleManagerCreateOrUpdate:
 
+class TestModuleManagerCreateOrUpdate:
     def test_no_device_returns_false(self, mm, mock_server):
         mock_server.get_netbox_server.return_value = None
         result = mm.create_or_update()
@@ -615,8 +768,8 @@ class TestModuleManagerCreateOrUpdate:
 # Tests: Asset Tag Validation (regex-only, no module import needed)
 # ---------------------------------------------------------------------------
 
-class TestAssetTagParsing:
 
+class TestAssetTagParsing:
     # Re-define the regex/constants here to avoid importing server.py
     # (which would trigger config import chain)
     _ASSET_TAG_RE = re.compile(r"^[0-9A-Z]{4}$", re.IGNORECASE)
@@ -643,8 +796,8 @@ class TestAssetTagParsing:
 # Tests: Base-36 Encoding
 # ---------------------------------------------------------------------------
 
-class TestBase36Encoding:
 
+class TestBase36Encoding:
     @staticmethod
     def int_to_base36(n, width=4):
         chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -684,16 +837,33 @@ class TestBase36Encoding:
 # These test the _is_valid_serial and _get_best_serial logic from server.py.
 # We re-implement the logic here to avoid importing server.py (config chain).
 
+
 class TestSerialValidation:
     """Test DMI placeholder detection and serial cascade logic."""
 
     _DMI_PLACEHOLDERS = {
-        "", "none", "n/a", "na", "not specified", "not available",
-        "not applicable", "to be filled by o.e.m.", "default string",
-        "0123456789", "..................", "system serial number",
-        "chassis serial number", "base board serial number",
-        "default", "unknown", "unspecified", "no asset information",
-        "empty", "xxxxxxxxxxxx", "0000000000", "____________",
+        "",
+        "none",
+        "n/a",
+        "na",
+        "not specified",
+        "not available",
+        "not applicable",
+        "to be filled by o.e.m.",
+        "default string",
+        "0123456789",
+        "..................",
+        "system serial number",
+        "chassis serial number",
+        "base board serial number",
+        "default",
+        "unknown",
+        "unspecified",
+        "no asset information",
+        "empty",
+        "xxxxxxxxxxxx",
+        "0000000000",
+        "____________",
     }
 
     def _is_valid_serial(self, value):
@@ -764,11 +934,10 @@ class TestSerialValidation:
 # Tests: API Retry
 # ---------------------------------------------------------------------------
 
-from netbox_agent.modules import _api_retry, MAX_RETRIES, RETRY_BACKOFF
+from netbox_agent.modules import _api_retry, MAX_RETRIES, RETRY_BACKOFF  # noqa: E402
 
 
 class TestApiRetry:
-
     def test_api_retry_success_first_attempt(self):
         """Succeeds on first call — no retries needed."""
         func = MagicMock(return_value="ok")
@@ -799,13 +968,14 @@ class TestApiRetry:
             _api_retry(func)
         # First retry: 2 * 2^0 = 2s, second retry: 2 * 2^1 = 4s
         calls = [c.args[0] for c in mock_sleep.call_args_list]
-        assert calls == [RETRY_BACKOFF * (2 ** 0), RETRY_BACKOFF * (2 ** 1)]
+        assert calls == [RETRY_BACKOFF * (2**0), RETRY_BACKOFF * (2**1)]
 
     def test_api_retry_logs_warnings(self):
         """Retries log warning messages."""
         func = MagicMock(side_effect=[Exception("oops"), "ok"])
-        with patch("netbox_agent.modules.time.sleep"), \
-             patch("netbox_agent.modules.logger") as mock_logger:
+        with patch("netbox_agent.modules.time.sleep"), patch(
+            "netbox_agent.modules.logger"
+        ) as mock_logger:
             _api_retry(func)
         mock_logger.warning.assert_called()
 
@@ -814,8 +984,8 @@ class TestApiRetry:
 # Tests: Sync Algorithm (extended)
 # ---------------------------------------------------------------------------
 
-class TestSyncAlgorithmExtended:
 
+class TestSyncAlgorithmExtended:
     def test_sync_duplicate_serials_warns(self, mm, nb):
         """Duplicate serials in remote lookup should log warning."""
         device = SimpleNamespace(id=1, name="test-server")
@@ -839,9 +1009,12 @@ class TestSyncAlgorithmExtended:
         nb.dcim.module_types.get.return_value = MagicMock(id=50)
 
         with patch("netbox_agent.modules.logger") as mock_logger:
-            mm._sync_category("gpu", [
-                {"product": "A100", "vendor": "NVIDIA", "serial": "DUP-SN"},
-            ])
+            mm._sync_category(
+                "gpu",
+                [
+                    {"product": "A100", "vendor": "NVIDIA", "serial": "DUP-SN"},
+                ],
+            )
         # Should log warning about duplicate serials
         warning_calls = [str(c) for c in mock_logger.warning.call_args_list]
         assert any("Duplicate" in s or "duplicate" in s.lower() for s in warning_calls)
@@ -899,9 +1072,12 @@ class TestSyncAlgorithmExtended:
         nb.dcim.module_type_profiles.get.return_value = MagicMock(id=1)
         nb.dcim.module_types.get.return_value = MagicMock(id=50)
 
-        mm._sync_category("cpu", [
-            {"product": "Xeon Gold 6430", "vendor": "Intel", "serial": None},
-        ])
+        mm._sync_category(
+            "cpu",
+            [
+                {"product": "Xeon Gold 6430", "vendor": "Intel", "serial": None},
+            ],
+        )
         # Should not create new — existing module is positionally matched
         nb.dcim.modules.create.assert_not_called()
 
@@ -953,9 +1129,12 @@ class TestSyncAlgorithmExtended:
         try:
             with patch("netbox_agent.modules.time.sleep"):
                 with pytest.raises(Exception, match="API error"):
-                    mm._sync_category("gpu", [
-                        {"product": "BadGPU", "vendor": "Unknown", "serial": "SN1"},
-                    ])
+                    mm._sync_category(
+                        "gpu",
+                        [
+                            {"product": "BadGPU", "vendor": "Unknown", "serial": "SN1"},
+                        ],
+                    )
         finally:
             nb.dcim.manufacturers.get.side_effect = None
             nb.dcim.module_bays.filter.side_effect = None
@@ -980,6 +1159,7 @@ class TestSyncAlgorithmExtended:
         spare_bay = SimpleNamespace(id=600, name="GPU-0")
 
         call_idx = [0]
+
         def modules_filter_seq(**kwargs):
             call_idx[0] += 1
             device_id = kwargs.get("device_id")
@@ -1001,9 +1181,10 @@ class TestSyncAlgorithmExtended:
 
         def bays_filter_spare(**kwargs):
             return [spare_bay]
+
         # Override for spare device bay lookups
         nb.dcim.module_bays.filter.side_effect = [
-            [],      # initial existing bays
+            [],  # initial existing bays
             [bay0],  # re-fetch
             [spare_bay],  # spare bays
         ]
@@ -1016,9 +1197,12 @@ class TestSyncAlgorithmExtended:
         new_mod = MagicMock(id=500)
         nb.dcim.modules.create.return_value = new_mod
 
-        mm._sync_category("gpu", [
-            {"product": "H100", "vendor": "NVIDIA", "serial": "NEW-SN"},
-        ])
+        mm._sync_category(
+            "gpu",
+            [
+                {"product": "H100", "vendor": "NVIDIA", "serial": "NEW-SN"},
+            ],
+        )
         # Occupant should have been moved (save called to re-parent)
         assert occupant.save.called
 
@@ -1046,9 +1230,12 @@ class TestSyncAlgorithmExtended:
         nb.dcim.module_type_profiles.get.return_value = MagicMock(id=1)
         nb.dcim.module_types.get.return_value = MagicMock(id=50)
 
-        mm._sync_category("gpu", [
-            {"product": "A100", "vendor": "NVIDIA", "serial": "GPU-SN-1"},
-        ])
+        mm._sync_category(
+            "gpu",
+            [
+                {"product": "A100", "vendor": "NVIDIA", "serial": "GPU-SN-1"},
+            ],
+        )
         # No save (no changes) and no create
         existing_mod.save.assert_not_called()
         nb.dcim.modules.create.assert_not_called()
@@ -1058,8 +1245,8 @@ class TestSyncAlgorithmExtended:
 # Tests: Re-parenting
 # ---------------------------------------------------------------------------
 
-class TestReparenting:
 
+class TestReparenting:
     def test_reparent_module_updates_device_and_bay(self, mm, nb):
         """reparent_module sets device and bay on the module."""
         module = MagicMock(serial="GPU-001")
@@ -1137,8 +1324,8 @@ class TestReparenting:
 # Tests: Spare Device
 # ---------------------------------------------------------------------------
 
-class TestSpareDevice:
 
+class TestSpareDevice:
     def test_get_spare_device_not_found_returns_none(self, mm, nb):
         """Spare device not in NetBox → returns None."""
         nb.dcim.devices.get.return_value = None
@@ -1163,8 +1350,8 @@ class TestSpareDevice:
 # Tests: Module Type Resolution (extended)
 # ---------------------------------------------------------------------------
 
-class TestModuleTypeResolutionExtended:
 
+class TestModuleTypeResolutionExtended:
     def test_resolve_module_type_missing_profile_still_creates(self, mm, nb):
         """Module type created even when profile not found."""
         mock_mfr = MagicMock(id=10)
@@ -1220,13 +1407,14 @@ class TestModuleTypeResolutionExtended:
 # Tests: Edge Cases
 # ---------------------------------------------------------------------------
 
-class TestEdgeCases:
 
+class TestEdgeCases:
     def test_parse_lsblk_empty_blockdevices(self, mm, mock_lshw):
         """Empty blockdevices list → empty result."""
         lsblk_data = {"blockdevices": []}
-        with patch("netbox_agent.modules.is_tool") as mock_is_tool, \
-             patch("netbox_agent.modules.subprocess.check_output") as mock_subprocess:
+        with patch("netbox_agent.modules.is_tool") as mock_is_tool, patch(
+            "netbox_agent.modules.subprocess.check_output"
+        ) as mock_subprocess:
             mock_is_tool.side_effect = lambda t: t == "lsblk"
             mock_subprocess.return_value = json.dumps(lsblk_data)
             ssds = mm._get_local_ssds()
@@ -1236,13 +1424,23 @@ class TestEdgeCases:
         """NVMe enrichment failure falls back to lsblk data only."""
         lsblk_data = {
             "blockdevices": [
-                {"name": "nvme0n1", "type": "disk", "size": 100000,
-                 "model": "TestNVMe", "serial": "SN-1", "vendor": None,
-                 "tran": "nvme", "rota": "0", "hctl": None, "rev": None},
+                {
+                    "name": "nvme0n1",
+                    "type": "disk",
+                    "size": 100000,
+                    "model": "TestNVMe",
+                    "serial": "SN-1",
+                    "vendor": None,
+                    "tran": "nvme",
+                    "rota": "0",
+                    "hctl": None,
+                    "rev": None,
+                },
             ]
         }
 
         call_idx = [0]
+
         def mock_check_output(cmd, **kwargs):
             call_idx[0] += 1
             if "lsblk" in cmd:
@@ -1251,8 +1449,9 @@ class TestEdgeCases:
                 raise Exception("nvme-cli failed")
             raise FileNotFoundError(cmd[0])
 
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output", side_effect=mock_check_output):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", side_effect=mock_check_output
+        ):
             ssds = mm._get_local_ssds()
 
         assert len(ssds) == 1
@@ -1264,8 +1463,9 @@ class TestEdgeCases:
             {"product": "A100", "vendor": "NVIDIA", "description": "3D"},
         ]
         nvidia_output = "0, [N/A]"
-        with patch("netbox_agent.modules.is_tool", return_value=True), \
-             patch("netbox_agent.modules.subprocess.check_output", return_value=nvidia_output):
+        with patch("netbox_agent.modules.is_tool", return_value=True), patch(
+            "netbox_agent.modules.subprocess.check_output", return_value=nvidia_output
+        ):
             gpus = mm._get_local_gpus()
         assert len(gpus) == 1
         assert gpus[0]["serial"] is None
@@ -1273,10 +1473,16 @@ class TestEdgeCases:
     def test_gpu_mixed_discrete_and_onboard(self, mm, mock_lshw):
         """Only discrete GPUs are detected — onboard VGA filtered out."""
         mock_lshw.get_hw_linux.return_value = [
-            {"product": "ASPEED Graphics Family", "vendor": "ASPEED Technology, Inc.",
-             "description": "VGA compatible controller"},
-            {"product": "H100 80GB HBM3", "vendor": "NVIDIA Corporation",
-             "description": "3D controller"},
+            {
+                "product": "ASPEED Graphics Family",
+                "vendor": "ASPEED Technology, Inc.",
+                "description": "VGA compatible controller",
+            },
+            {
+                "product": "H100 80GB HBM3",
+                "vendor": "NVIDIA Corporation",
+                "description": "3D controller",
+            },
         ]
         with patch("netbox_agent.modules.is_tool", return_value=False):
             gpus = mm._get_local_gpus()
@@ -1287,12 +1493,13 @@ class TestEdgeCases:
         """PSU placeholder serials (Not Specified, etc.) become None."""
         mock_dmidecode = MagicMock()
         mock_dmidecode.get_by_type.return_value = [
-            {"Name": "PSU-1", "Manufacturer": "Supermicro",
-             "Serial Number": "Not Specified"},
-            {"Name": "PSU-2", "Manufacturer": "Supermicro",
-             "Serial Number": "To Be Filled By O.E.M."},
-            {"Name": "PSU-3", "Manufacturer": "Supermicro",
-             "Serial Number": "PSU-REAL-SN"},
+            {"Name": "PSU-1", "Manufacturer": "Supermicro", "Serial Number": "Not Specified"},
+            {
+                "Name": "PSU-2",
+                "Manufacturer": "Supermicro",
+                "Serial Number": "To Be Filled By O.E.M.",
+            },
+            {"Name": "PSU-3", "Manufacturer": "Supermicro", "Serial Number": "PSU-REAL-SN"},
         ]
         with patch.dict(sys.modules, {"netbox_agent.dmidecode": mock_dmidecode}):
             psus = mm._get_local_psus()
@@ -1306,8 +1513,8 @@ class TestEdgeCases:
 # Tests: create_or_update with deps and state
 # ---------------------------------------------------------------------------
 
-class TestCreateOrUpdateWithDepsAndState:
 
+class TestCreateOrUpdateWithDepsAndState:
     def test_create_or_update_skips_psu_when_dmidecode_missing(self, mm, nb):
         """When dmidecode unavailable, PSU detection is skipped."""
         mm._get_local_cpus = MagicMock(return_value=[])
@@ -1327,9 +1534,9 @@ class TestCreateOrUpdateWithDepsAndState:
 
     def test_create_or_update_with_state_skips_unchanged(self, mm, nb):
         """With state, unchanged categories are skipped."""
-        mm._get_local_cpus = MagicMock(return_value=[
-            {"product": "Xeon", "vendor": "Intel", "serial": None}
-        ])
+        mm._get_local_cpus = MagicMock(
+            return_value=[{"product": "Xeon", "vendor": "Intel", "serial": None}]
+        )
         mm._get_local_gpus = MagicMock(return_value=[])
         mm._get_local_dimms = MagicMock(return_value=[])
         mm._get_local_ssds = MagicMock(return_value=[])
@@ -1349,9 +1556,9 @@ class TestCreateOrUpdateWithDepsAndState:
 
     def test_create_or_update_with_state_syncs_changed(self, mm, nb):
         """With state, changed categories ARE synced."""
-        mm._get_local_cpus = MagicMock(return_value=[
-            {"product": "Xeon", "vendor": "Intel", "serial": None}
-        ])
+        mm._get_local_cpus = MagicMock(
+            return_value=[{"product": "Xeon", "vendor": "Intel", "serial": None}]
+        )
         mm._get_local_gpus = MagicMock(return_value=[])
         mm._get_local_dimms = MagicMock(return_value=[])
         mm._get_local_ssds = MagicMock(return_value=[])

@@ -128,9 +128,7 @@ class SupermicroHost(ServerBase):
                 psu_amps[psu_num] = value
 
         if psu_amps:
-            logging.debug(
-                "SuperMicro power: found current sensors for %d PSU(s)", len(psu_amps)
-            )
+            logging.debug("SuperMicro power: found current sensors for %d PSU(s)", len(psu_amps))
             return [str(psu_amps[k]) for k in sorted(psu_amps)]
 
         # Strategy 2: Compute amps from per-PSU power (Watts) / voltage (Volts)
@@ -153,9 +151,7 @@ class SupermicroHost(ServerBase):
                 volts = psu_volts.get(psu_num, self._DEFAULT_VOLTAGE)
                 amps = watts / volts if volts > 0 else 0
                 result.append(str(round(amps, 3)))
-            logging.debug(
-                "SuperMicro power: computed amps from watts for %d PSU(s)", len(result)
-            )
+            logging.debug("SuperMicro power: computed amps from watts for %d PSU(s)", len(result))
             return result
 
         # Strategy 3: DCMI total system power, split across present PSUs
@@ -193,7 +189,10 @@ class SupermicroHost(ServerBase):
 
         logging.debug(
             "SuperMicro power: DCMI total %dW / %d PSU(s) = %.1fW each (%.3fA @ %dV)",
-            total_watts, psu_count, per_psu_watts, per_psu_amps,
+            total_watts,
+            psu_count,
+            per_psu_watts,
+            per_psu_amps,
             int(self._DEFAULT_VOLTAGE),
         )
         return [str(round(per_psu_amps, 3))] * psu_count
@@ -202,10 +201,7 @@ class SupermicroHost(ServerBase):
         """Count PSUs reporting 'Presence detected' in SDR."""
         try:
             sdr_out = subprocess.getoutput('ipmitool sdr type "Power Supply"')
-            count = sum(
-                1 for line in sdr_out.splitlines()
-                if "Presence detected" in line
-            )
+            count = sum(1 for line in sdr_out.splitlines() if "Presence detected" in line)
             return count if count > 0 else 1
         except Exception:
             return 1

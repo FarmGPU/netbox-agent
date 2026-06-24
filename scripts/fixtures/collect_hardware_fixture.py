@@ -85,7 +85,9 @@ def collect_lsblk():
     if err:
         # Some kernels don't support all columns — try minimal set
         logger.warning("lsblk full columns failed (%s), trying minimal...", err)
-        data, raw, err = _run_json(["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MODEL,SERIAL,VENDOR,TRAN,ROTA"])
+        data, raw, err = _run_json(
+            ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,MODEL,SERIAL,VENDOR,TRAN,ROTA"]
+        )
         if err:
             return {"available": True, "error": err, "raw": raw[:5000]}
     return {"available": True, "data": data}
@@ -153,11 +155,13 @@ def collect_nvidia_smi():
 
     # Query GPU details
     query_fields = "index,name,serial,uuid,pci.bus_id,memory.total,driver_version,power.limit"
-    stdout, stderr, rc = _run([
-        "nvidia-smi",
-        f"--query-gpu={query_fields}",
-        "--format=csv,noheader",
-    ])
+    stdout, stderr, rc = _run(
+        [
+            "nvidia-smi",
+            f"--query-gpu={query_fields}",
+            "--format=csv,noheader",
+        ]
+    )
     if rc == 0:
         results["query_csv"] = stdout
     else:
@@ -264,7 +268,8 @@ def main():
         description="Collect hardware fixture data from a real server"
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default=None,
         help="Output file path (default: <hostname>_fixture.json)",
     )
@@ -319,9 +324,9 @@ def main():
     logger.info("Transfer this file to tests/fixtures/ in the netbox-agent repo")
 
     # Print summary
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Fixture Summary: {hostname}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     for name, data in fixture.items():
         if name == "system":
             continue
@@ -341,7 +346,7 @@ def main():
                 elif "lscpu" in d:
                     detail = f" — {len(d['lscpu'])} fields"
         print(f"  {status} {name}{detail}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     return 0
 

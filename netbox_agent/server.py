@@ -28,8 +28,14 @@ from pprint import pprint
 # Base-36 asset tag validation: 4-char alphanumeric
 _ASSET_TAG_RE = re.compile(r"^[0-9A-Z]{4}$", re.IGNORECASE)
 _ASSET_TAG_PLACEHOLDERS = {
-    "Not Specified", "None", "N/A", "To Be Filled By O.E.M.", "",
-    "Chassis Asset Tag", "Default string", "No Asset Tag",
+    "Not Specified",
+    "None",
+    "N/A",
+    "To Be Filled By O.E.M.",
+    "",
+    "Chassis Asset Tag",
+    "Default string",
+    "No Asset Tag",
 }
 
 
@@ -235,7 +241,9 @@ class ServerBase:
 
     def _netbox_create_blade(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
+        device_type = get_device_type(
+            self.get_product_name(), manufacturer=self.get_manufacturer()
+        )
         serial = self.get_service_tag()
         hostname = self.get_hostname()
         logging.info(
@@ -260,7 +268,9 @@ class ServerBase:
 
     def _netbox_create_blade_expansion(self, chassis, datacenter, tenant, rack):
         device_role = get_device_role(config.device.blade_role)
-        device_type = get_device_type(self.get_expansion_product(), manufacturer=self.get_manufacturer())
+        device_type = get_device_type(
+            self.get_expansion_product(), manufacturer=self.get_manufacturer()
+        )
         serial = self.get_expansion_service_tag()
         hostname = self.get_hostname() + " expansion"
         logging.info(
@@ -335,7 +345,7 @@ class ServerBase:
         if not current_role:
             return
 
-        role_name = current_role.name if hasattr(current_role, 'name') else str(current_role)
+        role_name = current_role.name if hasattr(current_role, "name") else str(current_role)
         if role_name not in self._AUTO_ASSIGNABLE_ROLES:
             return  # Manually set role — don't touch
 
@@ -354,12 +364,15 @@ class ServerBase:
                 server.save()
                 logging.info(
                     "Refined role for '%s': %s → %s",
-                    server.name, old_role, new_role_name,
+                    server.name,
+                    old_role,
+                    new_role_name,
                 )
             else:
                 logging.warning(
                     "Role '%s' not found in NetBox — skipping refinement for '%s'",
-                    new_role_name, server.name,
+                    new_role_name,
+                    server.name,
                 )
 
     # Vendors/keywords for filtering onboard VGA from real GPUs
@@ -397,6 +410,7 @@ class ServerBase:
         gpu_count = 0
         try:
             from netbox_agent.lshw import LSHW
+
             lshw = LSHW()
             gpus = lshw.get_hw_linux("gpu")
 
@@ -429,14 +443,16 @@ class ServerBase:
         try:
             output = subprocess.check_output(
                 ["lsblk", "-J", "-b", "-d", "-o", "NAME,TYPE,SIZE"],
-                encoding="utf-8", timeout=10,
+                encoding="utf-8",
+                timeout=10,
             )
             data = json.loads(output)
-            disks = [d for d in data.get("blockdevices", [])
-                     if d.get("type") == "disk"
-                     and not d.get("name", "").startswith(
-                         ("loop", "ram", "zram", "dm-", "md")
-                     )]
+            disks = [
+                d
+                for d in data.get("blockdevices", [])
+                if d.get("type") == "disk"
+                and not d.get("name", "").startswith(("loop", "ram", "zram", "dm-", "md"))
+            ]
             disk_count = len(disks)
         except Exception as e:
             logging.warning("Storage detection failed during role refinement: %s", e)
@@ -453,8 +469,11 @@ class ServerBase:
     _RUNPOD_SERVICES = ("runpod", "safe_runpod", "runpod-worker")
     # MooseFS services indicate dedicated storage for RunPod
     _MOOSEFS_SERVICES = (
-        "moosefs-chunkserver", "moosefs-master", "moosefs-metalogger",
-        "mfschunkserver", "mfsmaster",
+        "moosefs-chunkserver",
+        "moosefs-master",
+        "moosefs-metalogger",
+        "mfschunkserver",
+        "mfsmaster",
     )
 
     def _detect_tenant(self) -> str:
@@ -468,7 +487,9 @@ class ServerBase:
             try:
                 result = subprocess.run(
                     ["systemctl", "is-active", svc],
-                    capture_output=True, encoding="utf-8", timeout=5,
+                    capture_output=True,
+                    encoding="utf-8",
+                    timeout=5,
                 )
                 if result.stdout.strip() == "active":
                     logging.debug("Tenant detection: service '%s' is active → runpod", svc)
@@ -488,7 +509,8 @@ class ServerBase:
         if not nb_tenant:
             logging.warning(
                 "Tenant '%s' not found in NetBox — skipping tenant sync for '%s'",
-                tenant_slug, server.name,
+                tenant_slug,
+                server.name,
             )
             return
 
@@ -499,12 +521,16 @@ class ServerBase:
             server.save()
             logging.info(
                 "Tenant for '%s': %s → %s",
-                server.name, old_name, nb_tenant.name,
+                server.name,
+                old_name,
+                nb_tenant.name,
             )
 
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
-        device_type = get_device_type(self.get_product_name(), manufacturer=self.get_manufacturer())
+        device_type = get_device_type(
+            self.get_product_name(), manufacturer=self.get_manufacturer()
+        )
         if not device_type:
             raise Exception('Chassis "{}" doesn\'t exist'.format(self.get_chassis()))
         serial = self.get_service_tag()
@@ -604,7 +630,9 @@ class ServerBase:
             try:
                 output = subprocess.check_output(
                     ["ipmitool", "fru", "print", "0"],
-                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                    encoding="utf-8",
+                    timeout=10,
+                    stderr=subprocess.DEVNULL,
                 )
                 for line in output.splitlines():
                     if "Product Asset Tag" in line and ":" in line:
@@ -661,7 +689,9 @@ class ServerBase:
             if devices:
                 logging.info(
                     "Matched device by BMC MAC %s → %s (id=%s)",
-                    bmc_mac, devices[0].name, devices[0].id,
+                    bmc_mac,
+                    devices[0].name,
+                    devices[0].id,
                 )
                 return devices[0]
             logging.debug("No device found with bmc_mac=%s", bmc_mac)
@@ -858,6 +888,7 @@ class ServerBase:
             )
             if update_modules:
                 from netbox_agent.modules import ModuleManager
+
                 self.module_manager = ModuleManager(server=self, config=config)
                 self.module_manager.create_or_update(deps=deps, state=state)
             # update psu
@@ -874,12 +905,13 @@ class ServerBase:
                     cluster = nb.virtualization.clusters.get(name=cluster_name)
                     if cluster:
                         nb_server = self.get_netbox_server()
-                        if nb_server and getattr(nb_server, 'cluster', None) != cluster:
+                        if nb_server and getattr(nb_server, "cluster", None) != cluster:
                             nb_server.cluster = cluster.id
                             nb_server.save()
                             logging.info(
                                 "Auto-assigned Proxmox host '%s' to cluster '%s'",
-                                nb_server.name, cluster_name,
+                                nb_server.name,
+                                cluster_name,
                             )
                     else:
                         logging.warning(
@@ -923,7 +955,9 @@ class ServerBase:
         if server.serial != local_serial:
             logging.info(
                 "Updating serial on '%s': %s -> %s",
-                server.name, server.serial, local_serial or "(empty)",
+                server.name,
+                server.serial,
+                local_serial or "(empty)",
             )
             server.serial = local_serial
             update += 1
@@ -967,7 +1001,8 @@ class ServerBase:
         if current_status_value in _ACTIVATABLE_STATUSES:
             logging.info(
                 "Transitioning device '%s' status: %s → active",
-                server.name, current_status_value,
+                server.name,
+                current_status_value,
             )
             server.status = "active"
             update += 1
@@ -1023,7 +1058,11 @@ class ServerBase:
         # Set oob_ip to the IPMI interface IP
         if not oob_update:
             for ip in myips:
-                if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
+                if (
+                    ip.assigned_object
+                    and ip.assigned_object.display == "IPMI"
+                    and ip != server.oob_ip
+                ):
                     server.oob_ip = ip.id
                     oob_update = True
                     break
@@ -1033,12 +1072,15 @@ class ServerBase:
                 server.save()
                 logging.info(
                     "Saved oob_ip for device %s (id=%s)",
-                    server.name, server.id,
+                    server.name,
+                    server.id,
                 )
             except Exception as e:
                 logging.error(
                     "Failed to save oob_ip for device %s (id=%s): %s",
-                    server.name, server.id, e,
+                    server.name,
+                    server.id,
+                    e,
                 )
 
         # --- Primary IPv4 assignment --- saved separately to avoid atomic failure ---
@@ -1075,24 +1117,43 @@ class ServerBase:
                 server.save()
                 logging.info(
                     "Saved primary_ip4 for device %s (id=%s)",
-                    server.name, server.id,
+                    server.name,
+                    server.id,
                 )
             except Exception as e:
                 logging.error(
                     "Failed to save primary_ip4 for device %s (id=%s): %s",
-                    server.name, server.id, e,
+                    server.name,
+                    server.id,
+                    e,
                 )
 
         logging.debug("Finished updating Server!")
 
     # DMI placeholder values that should be treated as "no serial"
     _DMI_PLACEHOLDERS = {
-        "", "none", "n/a", "na", "not specified", "not available",
-        "not applicable", "to be filled by o.e.m.", "default string",
-        "0123456789", "..................", "system serial number",
-        "chassis serial number", "base board serial number",
-        "default", "unknown", "unspecified", "no asset information",
-        "empty", "xxxxxxxxxxxx", "0000000000", "____________",
+        "",
+        "none",
+        "n/a",
+        "na",
+        "not specified",
+        "not available",
+        "not applicable",
+        "to be filled by o.e.m.",
+        "default string",
+        "0123456789",
+        "..................",
+        "system serial number",
+        "chassis serial number",
+        "base board serial number",
+        "default",
+        "unknown",
+        "unspecified",
+        "no asset information",
+        "empty",
+        "xxxxxxxxxxxx",
+        "0000000000",
+        "____________",
     }
 
     def _is_valid_serial(self, value):
@@ -1133,8 +1194,14 @@ class ServerBase:
         Distinct from the system serial (service tag) on many servers.
         """
         _PLACEHOLDERS = {
-            "", "none", "n/a", "not specified", "not available",
-            "to be filled by o.e.m.", "default string", "0123456789",
+            "",
+            "none",
+            "n/a",
+            "not specified",
+            "not available",
+            "to be filled by o.e.m.",
+            "default string",
+            "0123456789",
             "..................",
         }
         try:
@@ -1150,6 +1217,7 @@ class ServerBase:
         """Return the BMC MAC address from IPMI, if available."""
         try:
             from netbox_agent.ipmi import IPMI
+
             ipmi_data = IPMI().parse()
             if ipmi_data and ipmi_data.get("mac"):
                 return ipmi_data["mac"].upper()

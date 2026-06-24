@@ -45,7 +45,9 @@ def _scan_arp_scan(interface: str, timeout: int) -> list[tuple[str, str]]:
     try:
         result = subprocess.run(
             ["arp-scan", "--localnet", f"--interface={interface}", "--plain"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         for line in result.stdout.strip().splitlines():
             # arp-scan --plain output: IP\tMAC\tVendor (or IP\tMAC)
@@ -115,7 +117,9 @@ def _scan_nmap(interface: str, timeout: int) -> list[tuple[str, str]]:
     try:
         result = subprocess.run(
             ["nmap", "-sn", "-oX", "-", "-e", interface, cidr],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
         root = ET.fromstring(result.stdout)
         for host in root.findall("host"):
@@ -149,7 +153,9 @@ def _scan_ip_neigh() -> list[tuple[str, str]]:
     try:
         result = subprocess.run(
             ["ip", "-j", "neigh", "show"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         entries = json.loads(result.stdout) if result.stdout.strip() else []
         for entry in entries:
@@ -195,17 +201,17 @@ def _get_scan_interfaces(config) -> list[str]:
     # These waste time (arp-scan times out on bridges) and produce
     # noise (container-internal MACs are not useful for inventory).
     _SKIP_PREFIXES = (
-        "br-",      # Docker custom network bridges
-        "veth",     # Docker/container veth pairs
-        "vnet",     # libvirt/KVM virtual NICs
-        "virbr",    # libvirt default bridge
-        "cni",      # Kubernetes CNI
+        "br-",  # Docker custom network bridges
+        "veth",  # Docker/container veth pairs
+        "vnet",  # libvirt/KVM virtual NICs
+        "virbr",  # libvirt default bridge
+        "cni",  # Kubernetes CNI
         "flannel",  # Kubernetes flannel overlay
-        "calico",   # Kubernetes Calico
-        "tunl",     # tunnel interfaces
-        "podman",   # Podman container bridge
-        "wg",       # WireGuard tunnels
-        "tailscale", # Tailscale tunnel
+        "calico",  # Kubernetes Calico
+        "tunl",  # tunnel interfaces
+        "podman",  # Podman container bridge
+        "wg",  # WireGuard tunnels
+        "tailscale",  # Tailscale tunnel
     )
 
     for iface in sorted(os.listdir("/sys/class/net/")):
@@ -230,6 +236,7 @@ def _get_scan_interfaces(config) -> list[str]:
         # Check for IPv4 address (skip interfaces with no IP)
         try:
             import netifaces
+
             addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
             if not addrs:
                 continue
@@ -319,7 +326,9 @@ def scan_and_report(config) -> dict:
             timeout=post_timeout,
         )
         result["pairs_submitted"] = len(pairs_list)
-        result["response"] = resp.json() if resp.ok else {"status_code": resp.status_code, "text": resp.text}
+        result["response"] = (
+            resp.json() if resp.ok else {"status_code": resp.status_code, "text": resp.text}
+        )
         if not resp.ok:
             logging.warning("ARP report POST failed: HTTP %d — %s", resp.status_code, resp.text)
         else:

@@ -66,7 +66,8 @@ def _ensure_module_bay_templates(nb, device_type):
         if not STANDARD_BAY_PATTERN.match(t.name):
             logger.info(
                 "  Deleting legacy template '%s' from device type '%s'",
-                t.name, device_type.model,
+                t.name,
+                device_type.model,
             )
             t.delete()
             deleted += 1
@@ -78,17 +79,21 @@ def _ensure_module_bay_templates(nb, device_type):
             bay_name = f"{category}-{i}"
             if bay_name in existing_names:
                 continue
-            nb.dcim.module_bay_templates.create({
-                "device_type": device_type.id,
-                "name": bay_name,
-                "position": bay_name,
-            })
+            nb.dcim.module_bay_templates.create(
+                {
+                    "device_type": device_type.id,
+                    "name": bay_name,
+                    "position": bay_name,
+                }
+            )
             created += 1
 
     if created > 0 or deleted > 0:
         logger.info(
             "Device type '%s': added %d, deleted %d legacy template(s)",
-            device_type.model, created, deleted,
+            device_type.model,
+            created,
+            deleted,
         )
     else:
         logger.info("Device type '%s' — all bay templates present", device_type.model)
@@ -115,11 +120,13 @@ def _backfill_device_module_bays(nb, device):
         for template in templates:
             if template.name in existing_names:
                 continue
-            nb.dcim.module_bays.create({
-                "device": device.id,
-                "name": template.name,
-                "position": template.name,
-            })
+            nb.dcim.module_bays.create(
+                {
+                    "device": device.id,
+                    "name": template.name,
+                    "position": template.name,
+                }
+            )
             created += 1
 
     return created + deleted  # Return total changes for logging

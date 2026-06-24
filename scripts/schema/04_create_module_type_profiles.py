@@ -68,8 +68,16 @@ PROFILES = {
     "Memory": {
         "required": ["class", "size"],
         "properties": {
-            "ecc": {"type": "boolean", "title": "ECC", "description": "Error-correcting code is enabled"},
-            "size": {"type": "integer", "title": "Size (GB)", "description": "Raw capacity of the module"},
+            "ecc": {
+                "type": "boolean",
+                "title": "ECC",
+                "description": "Error-correcting code is enabled",
+            },
+            "size": {
+                "type": "integer",
+                "title": "Size (GB)",
+                "description": "Raw capacity of the module",
+            },
             "class": {
                 "enum": ["DDR3", "DDR4", "DDR5"],
                 "type": "string",
@@ -125,14 +133,18 @@ def run(nb):
             if existing.schema != schema:
                 existing.schema = schema
                 existing.save()
-                logger.info("Updated profile '%s' (id=%d) with enriched schema", profile_name, existing.id)
+                logger.info(
+                    "Updated profile '%s' (id=%d) with enriched schema", profile_name, existing.id
+                )
             else:
                 logger.info("Profile '%s' already has correct schema — skipping", profile_name)
         else:
-            result = nb.dcim.module_type_profiles.create({
-                "name": profile_name,
-                "schema": schema,
-            })
+            result = nb.dcim.module_type_profiles.create(
+                {
+                    "name": profile_name,
+                    "schema": schema,
+                }
+            )
             logger.info("Created profile '%s' (id=%d)", profile_name, result.id)
 
 

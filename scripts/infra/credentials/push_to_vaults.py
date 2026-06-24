@@ -78,7 +78,8 @@ def create_login_item(vault, title, username, password, dry_run=False, update=Fa
         # Check if item exists and delete it
         result = subprocess.run(
             ["op", "item", "get", title, f"--vault={vault}", "--format=json"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             try:
@@ -93,14 +94,17 @@ def create_login_item(vault, title, username, password, dry_run=False, update=Fa
 
     result = subprocess.run(
         [
-            "op", "item", "create",
+            "op",
+            "item",
+            "create",
             "--category=Login",
             f"--vault={vault}",
             f"--title={title}",
             f"username={username}",
             f"password={password}",
         ],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
 
     if result.returncode == 0:
@@ -118,10 +122,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Push credentials to 1Password vaults (individual items per device)",
     )
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Preview without creating items")
-    parser.add_argument("--update", action="store_true",
-                        help="Delete and recreate existing items")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without creating items")
+    parser.add_argument("--update", action="store_true", help="Delete and recreate existing items")
     parser.add_argument("--fgpu-vault", default=VAULT_FGPU)
     parser.add_argument("--oem-vault", default=VAULT_OEM)
     args = parser.parse_args()
@@ -130,7 +132,8 @@ def main():
         # Verify signed in and vaults exist
         result = subprocess.run(
             ["op", "vault", "list", "--format=json"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
             print("ERROR: Not signed in to 1Password. Run: eval $(op signin)")
@@ -148,12 +151,14 @@ def main():
     switches = load_csv_credentials(SWITCHES_CSV)
 
     all_creds = pdu + compute + machines + switches
-    print(f"Loaded: {len(pdu)} PDU + {len(compute)} compute + {len(machines)} machines OEM + {len(switches)} switch = {len(all_creds)} total")
+    print(
+        f"Loaded: {len(pdu)} PDU + {len(compute)} compute + {len(machines)} machines OEM + {len(switches)} switch = {len(all_creds)} total"
+    )
 
     # Classify and deduplicate: one entry per (tag, vault)
     # If same tag has multiple creds for same vault, keep first
     fgpu_items = {}  # tag -> (user, pw)
-    oem_items = {}   # tag -> (user, pw)
+    oem_items = {}  # tag -> (user, pw)
 
     for tag, user, pw in all_creds:
         if is_default(user):
@@ -163,12 +168,12 @@ def main():
             if tag not in fgpu_items:
                 fgpu_items[tag] = (user, pw)
 
-    print(f"\nItems to create:")
+    print("\nItems to create:")
     print(f"  {args.fgpu_vault}: {len(fgpu_items)} devices")
     print(f"  {args.oem_vault}:  {len(oem_items)} devices")
 
     if args.dry_run:
-        print(f"\n=== DRY RUN ===\n")
+        print("\n=== DRY RUN ===\n")
 
     # Create OEM items
     print(f"\n── {args.oem_vault} ({len(oem_items)} items) ──")
@@ -176,8 +181,9 @@ def main():
     oem_fail = 0
     for tag in sorted(oem_items):
         user, pw = oem_items[tag]
-        if create_login_item(args.oem_vault, tag, user, pw,
-                             dry_run=args.dry_run, update=args.update):
+        if create_login_item(
+            args.oem_vault, tag, user, pw, dry_run=args.dry_run, update=args.update
+        ):
             oem_ok += 1
         else:
             oem_fail += 1
@@ -188,15 +194,16 @@ def main():
     fgpu_fail = 0
     for tag in sorted(fgpu_items):
         user, pw = fgpu_items[tag]
-        if create_login_item(args.fgpu_vault, tag, user, pw,
-                             dry_run=args.dry_run, update=args.update):
+        if create_login_item(
+            args.fgpu_vault, tag, user, pw, dry_run=args.dry_run, update=args.update
+        ):
             fgpu_ok += 1
         else:
             fgpu_fail += 1
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     if args.dry_run:
-        print(f"DRY RUN complete.")
+        print("DRY RUN complete.")
     else:
         print(f"{args.oem_vault}:  {oem_ok} created, {oem_fail} failed")
         print(f"{args.fgpu_vault}: {fgpu_ok} created, {fgpu_fail} failed")

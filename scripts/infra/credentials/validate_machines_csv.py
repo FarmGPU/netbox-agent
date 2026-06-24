@@ -85,17 +85,19 @@ def load_machines_csv(path, mac_index):
 
             asset_tag = mac_index.get(mac_norm, "")
 
-            entries.append({
-                "friendly": friendly,
-                "hostname": hostname,
-                "serial": serial,
-                "mac": mac_raw,
-                "mac_norm": mac_norm,
-                "bmc_ip": bmc_ip,
-                "password": pw,
-                "model": model,
-                "asset_tag": asset_tag,
-            })
+            entries.append(
+                {
+                    "friendly": friendly,
+                    "hostname": hostname,
+                    "serial": serial,
+                    "mac": mac_raw,
+                    "mac_norm": mac_norm,
+                    "bmc_ip": bmc_ip,
+                    "password": pw,
+                    "model": model,
+                    "asset_tag": asset_tag,
+                }
+            )
     return entries
 
 
@@ -109,13 +111,23 @@ def try_redfish(ip, username, password):
     try:
         result = subprocess.run(
             [
-                "curl", "-sk", "--connect-timeout", str(TIMEOUT_SECS),
-                "--max-time", str(TIMEOUT_SECS),
-                "-o", "/dev/null", "-w", "%{http_code}",
-                "-u", f"{username}:{password}",
+                "curl",
+                "-sk",
+                "--connect-timeout",
+                str(TIMEOUT_SECS),
+                "--max-time",
+                str(TIMEOUT_SECS),
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-u",
+                f"{username}:{password}",
                 f"https://{ip}/redfish/v1/Systems/",
             ],
-            capture_output=True, text=True, timeout=TIMEOUT_SECS + 5,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECS + 5,
         )
         code = result.stdout.strip()
         return code == "200"
@@ -128,11 +140,21 @@ def try_ipmi(ip, username, password):
     try:
         result = subprocess.run(
             [
-                "ipmitool", "-I", "lanplus",
-                "-H", ip, "-U", username, "-P", password,
-                "chassis", "status",
+                "ipmitool",
+                "-I",
+                "lanplus",
+                "-H",
+                ip,
+                "-U",
+                username,
+                "-P",
+                password,
+                "chassis",
+                "status",
             ],
-            capture_output=True, text=True, timeout=TIMEOUT_SECS + 5,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECS + 5,
         )
         return result.returncode == 0 and "Power" in result.stdout
     except Exception:
@@ -184,7 +206,10 @@ def main():
         "--output",
         default=os.path.join(
             os.path.expanduser("~"),
-            "asset-tag-testing", "csvs", "compute", "machines_validated.csv",
+            "asset-tag-testing",
+            "csvs",
+            "compute",
+            "machines_validated.csv",
         ),
     )
     args = parser.parse_args()
@@ -225,38 +250,53 @@ def main():
                 print(f"  - {entry['friendly']:<14} {tag_str:<10} (no BMC IP)")
             else:
                 failed += 1
-                print(
-                    f"  ✗ {entry['friendly']:<14} {tag_str:<10} "
-                    f"FAILED @ {entry['bmc_ip']}"
-                )
+                print(f"  ✗ {entry['friendly']:<14} {tag_str:<10} FAILED @ {entry['bmc_ip']}")
 
     # Sort results by friendly name for consistent output
     results.sort(key=lambda e: e["friendly"])
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Results: {ok} OK, {failed} FAILED, {no_ip} no IP")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Write validated CSV
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([
-            "hostname", "friendly", "model", "serial", "bmc_mac", "bmc_ip",
-            "asset_tag", "validated_user", "validated_password",
-            "validated_protocol", "status",
-        ])
+        writer.writerow(
+            [
+                "hostname",
+                "friendly",
+                "model",
+                "serial",
+                "bmc_mac",
+                "bmc_ip",
+                "asset_tag",
+                "validated_user",
+                "validated_password",
+                "validated_protocol",
+                "status",
+            ]
+        )
         for e in results:
             # Always write the password from machines.csv — even for
             # FAILED/NO_IP entries.  The password came from the CSV and
             # is likely correct; failure just means the BMC was unreachable.
-            writer.writerow([
-                e["hostname"], e["friendly"], e["model"], e["serial"],
-                e["mac"], e["bmc_ip"], e["asset_tag"],
-                e["validated_user"] or "ADMIN",
-                e["password"],
-                e.get("validated_protocol", ""), e["status"],
-            ])
+            writer.writerow(
+                [
+                    e["hostname"],
+                    e["friendly"],
+                    e["model"],
+                    e["serial"],
+                    e["mac"],
+                    e["bmc_ip"],
+                    e["asset_tag"],
+                    e["validated_user"] or "ADMIN",
+                    e["password"],
+                    e.get("validated_protocol", ""),
+                    e["status"],
+                ]
+            )
 
     print(f"\nWrote: {args.output}")
     print(f"  {ok} entries with validated credentials")

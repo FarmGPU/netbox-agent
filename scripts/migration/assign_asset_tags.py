@@ -96,7 +96,9 @@ def run(nb, dry_run=True):
 
 def main():
     parser = argparse.ArgumentParser(description="Assign Base-36 asset tags to devices")
-    parser.add_argument("--dry-run", action="store_true", help="Preview assignments without applying")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview assignments without applying"
+    )
     args = parser.parse_args()
 
     nb = get_api()

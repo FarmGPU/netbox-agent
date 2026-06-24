@@ -71,19 +71,22 @@ def run(config):
         or network_only
     ):
         server.netbox_create_or_update(
-            config, deps=deps, network_only=network_only, state=state,
+            config,
+            deps=deps,
+            network_only=network_only,
+            state=state,
         )
     if config.debug:
         server.print_debug()
 
     # ARP neighbor reporting (after main sync)
-    arp_enabled = (
-        getattr(config, "arp_report", None)
-        and getattr(config.arp_report, "enabled", False)
+    arp_enabled = getattr(config, "arp_report", None) and getattr(
+        config.arp_report, "enabled", False
     )
     arp_flag = getattr(config, "arp_report_flag", False)
     if arp_enabled or arp_flag:
         from netbox_agent.arp_reporter import scan_and_report
+
         try:
             arp_result = scan_and_report(config)
             logging.info(

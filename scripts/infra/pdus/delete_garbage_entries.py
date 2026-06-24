@@ -21,7 +21,7 @@ from nb_connection import get_api, logger
 
 # Hard-coded targets — each tuple: (device_id, expected_name, reason)
 GARBAGE_DEVICES = [
-    (202, "|PDU19-7-14",     "Duplicate with pipe char prefix"),
+    (202, "|PDU19-7-14", "Duplicate with pipe char prefix"),
     (232, "smf010301-pdu01", "Empty OEM placeholder"),
     (233, "smf010301-pdu02", "Empty OEM placeholder"),
 ]
@@ -50,16 +50,19 @@ def main():
             continue
 
         if device.name != expected_name:
-            msg = (f"  ID {device_id}: NAME MISMATCH — expected '{expected_name}', "
-                   f"got '{device.name}'. SKIPPING for safety.")
+            msg = (
+                f"  ID {device_id}: NAME MISMATCH — expected '{expected_name}', "
+                f"got '{device.name}'. SKIPPING for safety."
+            )
             print(msg)
             errors.append(msg)
             continue
 
         serial = device.serial or "(none)"
         dtype = device.device_type.model if device.device_type else "(none)"
-        print(f"  ID {device_id}: name='{device.name}' serial={serial} "
-              f"type={dtype} reason={reason}")
+        print(
+            f"  ID {device_id}: name='{device.name}' serial={serial} type={dtype} reason={reason}"
+        )
 
     if errors:
         print(f"\n{len(errors)} problem(s) found. Review above before proceeding.")

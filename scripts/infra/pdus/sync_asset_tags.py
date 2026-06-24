@@ -68,6 +68,7 @@ LIVE_VERIFY_WORKERS = 10
 
 # ── Phase 1: Load and merge CSV data ─────────────────────────────────────────
 
+
 def load_hostnames_csv(path):
     """
     Read hostnames.csv and return {serial: record} plus a list of
@@ -105,13 +106,15 @@ def load_hostnames_csv(path):
                     "csv_ip": csv_ip,
                 }
             else:
-                unverifiable.append({
-                    "hostname": hostname,
-                    "asset_tag": asset_tag,
-                    "serial": "",
-                    "live_ip": "",
-                    "reason": "No serial in CSV",
-                })
+                unverifiable.append(
+                    {
+                        "hostname": hostname,
+                        "asset_tag": asset_tag,
+                        "serial": "",
+                        "live_ip": "",
+                        "reason": "No serial in CSV",
+                    }
+                )
 
     return by_serial, unverifiable
 
@@ -160,25 +163,30 @@ def merge_csv_data(hostnames_path, validated_path):
             live_ip = hn_rec.get("csv_ip", "")
 
         if live_ip:
-            verifiable.append({
-                "hostname": hn_rec["hostname"],
-                "asset_tag": hn_rec["asset_tag"],
-                "serial": serial,
-                "live_ip": live_ip,
-            })
+            verifiable.append(
+                {
+                    "hostname": hn_rec["hostname"],
+                    "asset_tag": hn_rec["asset_tag"],
+                    "serial": serial,
+                    "live_ip": live_ip,
+                }
+            )
         else:
-            unverifiable.append({
-                "hostname": hn_rec["hostname"],
-                "asset_tag": hn_rec["asset_tag"],
-                "serial": serial,
-                "live_ip": "",
-                "reason": "No reachable IP",
-            })
+            unverifiable.append(
+                {
+                    "hostname": hn_rec["hostname"],
+                    "asset_tag": hn_rec["asset_tag"],
+                    "serial": serial,
+                    "live_ip": "",
+                    "reason": "No reachable IP",
+                }
+            )
 
     return verifiable, unverifiable
 
 
 # ── Phase 2: Pre-flight serial verification ──────────────────────────────────
+
 
 def verify_one_serial(entry):
     """Fetch serial from live PDU via HTTP and compare to CSV serial."""
@@ -203,9 +211,9 @@ def run_live_verification(verifiable):
     Verify serials in parallel via HTTP.
     Returns (results, had_failures).
     """
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Phase 2: Live serial verification")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"Verifying {len(verifiable)} PDUs (workers={LIVE_VERIFY_WORKERS})...\n")
 
     with ThreadPoolExecutor(max_workers=LIVE_VERIFY_WORKERS) as pool:
@@ -227,13 +235,16 @@ def run_live_verification(verifiable):
         else:
             icon = "\u274c " + e["status"]
             had_failures = True
-        print(f"{e['hostname']:<30} {e['serial']:<12} "
-              f"{e.get('live_serial', ''):<12} {e['live_ip']:<18} {icon}")
+        print(
+            f"{e['hostname']:<30} {e['serial']:<12} "
+            f"{e.get('live_serial', ''):<12} {e['live_ip']:<18} {icon}"
+        )
 
     return results, had_failures
 
 
 # ── Phase 3: NetBox update ───────────────────────────────────────────────────
+
 
 def _get_api_session():
     """
@@ -254,11 +265,13 @@ def _get_api_session():
 
     session = requests.Session()
     session.verify = ssl_verify
-    session.headers.update({
-        "Authorization": f"Token {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    })
+    session.headers.update(
+        {
+            "Authorization": f"Token {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    )
     return session, url
 
 
@@ -284,8 +297,9 @@ def update_device_asset_tag(nb, hostname, expected_serial, asset_tag, dry_run):
 
     # Belt-and-suspenders: if we have an expected serial, confirm NetBox agrees
     if expected_serial and device.serial and device.serial != expected_serial:
-        return False, (f"Serial mismatch in NetBox: expected '{expected_serial}', "
-                       f"got '{device.serial}'")
+        return False, (
+            f"Serial mismatch in NetBox: expected '{expected_serial}', got '{device.serial}'"
+        )
 
     if device.asset_tag == asset_tag:
         return True, f"Already set to '{asset_tag}'"
@@ -320,9 +334,9 @@ def run_netbox_updates(nb, entries, dry_run):
     """
     Phase 3: Update asset_tags in NetBox for the given entries.
     """
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Phase 3: NetBox asset tag updates")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     successes = 0
     failures = 0
@@ -338,7 +352,9 @@ def run_netbox_updates(nb, entries, dry_run):
             successes += 1
         else:
             failures += 1
-        print(f"  [{status}] {hostname:<30} tag={asset_tag:<6} serial={serial or '(none)':<10} {msg}")
+        print(
+            f"  [{status}] {hostname:<30} tag={asset_tag:<6} serial={serial or '(none)':<10} {msg}"
+        )
 
     print(f"\nResults: {successes} succeeded, {failures} failed (of {len(entries)} total)")
     return failures == 0
@@ -346,13 +362,14 @@ def run_netbox_updates(nb, entries, dry_run):
 
 # ── Phase 4: Post-update verification ────────────────────────────────────────
 
+
 def run_post_verification(nb, entries):
     """
     Re-read all updated devices from NetBox and confirm asset_tags match.
     """
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Phase 4: Post-update verification")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     ok_count = 0
     fail_count = 0
@@ -381,6 +398,7 @@ def run_post_verification(nb, entries):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Sync PDU asset tags from CSV into NetBox with live serial verification.",
@@ -391,27 +409,40 @@ examples:
   %(prog)s --verified-only                # program verified PDUs (safest)
   %(prog)s --dry-run                      # preview all PDUs
   %(prog)s                                # program all PDUs
-""")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="show what would change, don't write to NetBox")
-    parser.add_argument("--verified-only", action="store_true",
-                        help="only program PDUs whose serials were live-verified "
-                             "(skips unverifiable entries)")
-    parser.add_argument("--skip-live-verify", action="store_true",
-                        help="skip HTTP serial verification (trust CSV data)")
-    parser.add_argument("--hostnames-csv", default=HOSTNAMES_CSV,
-                        help=f"path to hostnames.csv (default: {HOSTNAMES_CSV})")
-    parser.add_argument("--validated-csv", default=VALIDATED_CSV,
-                        help=f"path to validated_hosts.csv (default: {VALIDATED_CSV})")
+""",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="show what would change, don't write to NetBox"
+    )
+    parser.add_argument(
+        "--verified-only",
+        action="store_true",
+        help="only program PDUs whose serials were live-verified (skips unverifiable entries)",
+    )
+    parser.add_argument(
+        "--skip-live-verify",
+        action="store_true",
+        help="skip HTTP serial verification (trust CSV data)",
+    )
+    parser.add_argument(
+        "--hostnames-csv",
+        default=HOSTNAMES_CSV,
+        help=f"path to hostnames.csv (default: {HOSTNAMES_CSV})",
+    )
+    parser.add_argument(
+        "--validated-csv",
+        default=VALIDATED_CSV,
+        help=f"path to validated_hosts.csv (default: {VALIDATED_CSV})",
+    )
     args = parser.parse_args()
 
     if args.dry_run:
         print("=== DRY RUN — no changes will be made ===\n")
 
     # ── Phase 1 ──────────────────────────────────────────────────────────
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print("Phase 1: Loading CSV data")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  hostnames.csv:  {args.hostnames_csv}")
     print(f"  validated.csv:  {args.validated_csv}")
 

@@ -123,12 +123,8 @@ def cleanup_bays(nb, dry):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Clean up legacy module bay templates and bays"
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true", help="Print what would be deleted"
-    )
+    parser = argparse.ArgumentParser(description="Clean up legacy module bay templates and bays")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would be deleted")
     args = parser.parse_args()
     dry = args.dry_run
 

@@ -31,7 +31,9 @@ def run(nb, dry_run=True):
     for mod in modules:
         device_name = "Unknown"
         if mod.device:
-            device_name = getattr(mod.device, "name", None) or getattr(mod.device, "display", str(mod.device))
+            device_name = getattr(mod.device, "name", None) or getattr(
+                mod.device, "display", str(mod.device)
+            )
         by_device.setdefault(device_name, []).append(mod)
 
     print("\nModules by device:")

@@ -129,7 +129,7 @@ class Ethtool:
             if colon <= 0:
                 continue
             key = line[:colon].strip()
-            value = line[colon + 1:].strip()
+            value = line[colon + 1 :].strip()
 
             if key in module_field_map:
                 field_key = module_field_map[key]

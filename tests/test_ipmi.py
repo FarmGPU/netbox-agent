@@ -30,7 +30,6 @@ MAC Address             : 00:00:00:00:00:00
 
 
 class TestIPMI:
-
     def test_ipmi_channel_fallback(self):
         """Channel 1 fails (0.0.0.0), channel 2 succeeds."""
         call_count = [0]
@@ -43,9 +42,9 @@ class TestIPMI:
                 return (0, _SAMPLE_OUTPUT)
             return (1, "")
 
-        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), \
-             patch("netbox_agent.ipmi.subprocess.getstatusoutput",
-                   side_effect=mock_getstatusoutput):
+        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), patch(
+            "netbox_agent.ipmi.subprocess.getstatusoutput", side_effect=mock_getstatusoutput
+        ):
             ipmi = IPMI()
 
         assert ipmi.channel == 2
@@ -55,9 +54,9 @@ class TestIPMI:
 
     def test_ipmi_prefix_normalization_to_32(self):
         """OOB IP is always normalized to /32 regardless of subnet mask."""
-        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), \
-             patch("netbox_agent.ipmi.subprocess.getstatusoutput",
-                   return_value=(0, _SAMPLE_OUTPUT)):
+        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), patch(
+            "netbox_agent.ipmi.subprocess.getstatusoutput", return_value=(0, _SAMPLE_OUTPUT)
+        ):
             ipmi = IPMI()
             result = ipmi.parse()
 
@@ -74,12 +73,13 @@ class TestIPMI:
 
     def test_ipmi_invalid_ip_skipped(self):
         """All channels return 0.0.0.0 → empty dict."""
+
         def mock_getstatusoutput(cmd):
             return (0, _INVALID_IP_OUTPUT)
 
-        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), \
-             patch("netbox_agent.ipmi.subprocess.getstatusoutput",
-                   side_effect=mock_getstatusoutput):
+        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), patch(
+            "netbox_agent.ipmi.subprocess.getstatusoutput", side_effect=mock_getstatusoutput
+        ):
             ipmi = IPMI()
             result = ipmi.parse()
 
@@ -92,9 +92,9 @@ class TestIPMI:
             "802.1q VLAN ID          : Disabled",
             "802.1q VLAN ID          : 100",
         )
-        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), \
-             patch("netbox_agent.ipmi.subprocess.getstatusoutput",
-                   return_value=(0, vlan_output)):
+        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), patch(
+            "netbox_agent.ipmi.subprocess.getstatusoutput", return_value=(0, vlan_output)
+        ):
             ipmi = IPMI()
             result = ipmi.parse()
 
@@ -102,9 +102,9 @@ class TestIPMI:
 
     def test_ipmi_all_channels_fail(self):
         """All channels return non-zero exit code → empty dict."""
-        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), \
-             patch("netbox_agent.ipmi.subprocess.getstatusoutput",
-                   return_value=(1, "error")):
+        with patch("netbox_agent.ipmi.which", return_value="/usr/bin/ipmitool"), patch(
+            "netbox_agent.ipmi.subprocess.getstatusoutput", return_value=(1, "error")
+        ):
             ipmi = IPMI()
             result = ipmi.parse()
 

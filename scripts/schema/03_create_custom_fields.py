@@ -101,7 +101,11 @@ def run(nb):
     for field_def in fields:
         existing = nb.extras.custom_fields.get(name=field_def["name"])
         if existing:
-            logger.info("Custom field '%s' already exists (id=%d) — skipping", field_def["name"], existing.id)
+            logger.info(
+                "Custom field '%s' already exists (id=%d) — skipping",
+                field_def["name"],
+                existing.id,
+            )
             continue
 
         result = nb.extras.custom_fields.create(field_def)
@@ -125,16 +129,18 @@ def run(nb):
             logger.info("bmc_mac_address already configured correctly — skipping")
     else:
         logger.warning("bmc_mac_address custom field not found — creating it")
-        nb.extras.custom_fields.create({
-            "name": "bmc_mac_address",
-            "label": "BMC MAC Address",
-            "type": "text",
-            "object_types": ["dcim.device"],
-            "required": False,
-            "validation_regex": r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
-            "description": "BMC/IPMI MAC address",
-            "weight": 600,
-        })
+        nb.extras.custom_fields.create(
+            {
+                "name": "bmc_mac_address",
+                "label": "BMC MAC Address",
+                "type": "text",
+                "object_types": ["dcim.device"],
+                "required": False,
+                "validation_regex": r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$",
+                "description": "BMC/IPMI MAC address",
+                "weight": 600,
+            }
+        )
         logger.info("Created bmc_mac_address custom field")
 
 

@@ -42,7 +42,7 @@ def _api_retry(func, *args, **kwargs):
             return func(*args, **kwargs)
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
-                wait = RETRY_BACKOFF * (2 ** attempt)
+                wait = RETRY_BACKOFF * (2**attempt)
                 logger.warning("API call failed (%s), retrying in %ds...", e, wait)
                 time.sleep(wait)
             else:
@@ -80,8 +80,19 @@ class ModuleManager:
     # ------------------------------------------------------------------ #
 
     # Vendor ID normalization (from SILO cpu.py)
-    _INTEL_ALIASES = {"genuineintel", "intel", "intel(r) corporation", "intel corporation", "intel corp."}
-    _AMD_ALIASES = {"authenticamd", "advanced micro devices", "amd", "advanced micro devices [amd]"}
+    _INTEL_ALIASES = {
+        "genuineintel",
+        "intel",
+        "intel(r) corporation",
+        "intel corporation",
+        "intel corp.",
+    }
+    _AMD_ALIASES = {
+        "authenticamd",
+        "advanced micro devices",
+        "amd",
+        "advanced micro devices [amd]",
+    }
 
     def _normalize_cpu_vendor(self, vendor_id):
         """Normalize CPU vendor string. Informed by SILO's normalize_cpu_make()."""
@@ -148,12 +159,14 @@ class ModuleManager:
 
         items = []
         for i in range(sockets):
-            items.append({
-                "product": model.strip(),
-                "vendor": vendor,
-                "serial": None,  # CPUs don't report serials
-                "slot": f"CPU{i}",
-            })
+            items.append(
+                {
+                    "product": model.strip(),
+                    "vendor": vendor,
+                    "serial": None,  # CPUs don't report serials
+                    "slot": f"CPU{i}",
+                }
+            )
         return items
 
     def _get_local_cpus_lshw_fallback(self):
@@ -166,20 +179,31 @@ class ModuleManager:
 
             # Basic filtering for lshw fallback — skip obvious accelerators
             combined = f"{product} {description}".lower()
-            skip_keywords = {"qat", "quickassist", "dlb", "iaa", "dsa",
-                             "co-processor", "coprocessor", "accelerator", "4xxx"}
+            skip_keywords = {
+                "qat",
+                "quickassist",
+                "dlb",
+                "iaa",
+                "dsa",
+                "co-processor",
+                "coprocessor",
+                "accelerator",
+                "4xxx",
+            }
             if any(kw in combined for kw in skip_keywords):
                 continue
             # Skip entries where product is just a vendor name
             if product.lower().strip() in self._INTEL_ALIASES | self._AMD_ALIASES:
                 continue
 
-            items.append({
-                "product": product,
-                "vendor": self._normalize_cpu_vendor(vendor),
-                "serial": None,
-                "slot": cpu.get("location", ""),
-            })
+            items.append(
+                {
+                    "product": product,
+                    "vendor": self._normalize_cpu_vendor(vendor),
+                    "serial": None,
+                    "slot": cpu.get("location", ""),
+                }
+            )
         return items
 
     # BMC/onboard VGA controllers that should NOT be tracked as GPU modules
@@ -201,8 +225,12 @@ class ModuleManager:
         amd_serials = self._get_amd_gpu_serials() if amd_driver else {}
         amd_gpu_idx = 0  # Counter for AMD GPUs (separate from NVIDIA index)
         gaudi_driver, gaudi_devices = self._get_intel_gaudi_info()
-        gaudi_serials = {d.get("businfo", ""): d.get("serial") for d in gaudi_devices if d.get("serial")}
-        gaudi_names = {d.get("businfo", ""): d.get("product") for d in gaudi_devices if d.get("product")}
+        gaudi_serials = {
+            d.get("businfo", ""): d.get("serial") for d in gaudi_devices if d.get("serial")
+        }
+        gaudi_names = {
+            d.get("businfo", ""): d.get("product") for d in gaudi_devices if d.get("product")
+        }
 
         items = []
         real_idx = 0  # index into nvidia-smi GPU info (only real GPUs)
@@ -223,7 +251,11 @@ class ModuleManager:
             # Skip onboard VGA — but NOT discrete NVIDIA/AMD GPUs which may also
             # report as "VGA compatible" when lshw doesn't have the PCI ID mapping.
             is_known_gpu_vendor = any(v in vendor_lower for v in ("nvidia", "amd", "ati"))
-            if "VGA compatible" in description and "3D" not in description and not is_known_gpu_vendor:
+            if (
+                "VGA compatible" in description
+                and "3D" not in description
+                and not is_known_gpu_vendor
+            ):
                 logger.debug("Skipping VGA-only device: %s %s", vendor, product)
                 continue
 
@@ -273,12 +305,14 @@ class ModuleManager:
                 desc_parts.append(f"SynapseAI: habanalabs {gaudi_driver}")
             full_desc = " | ".join(p for p in desc_parts if p)
 
-            items.append({
-                "product": product,
-                "vendor": vendor,
-                "serial": serial,
-                "description": full_desc,
-            })
+            items.append(
+                {
+                    "product": product,
+                    "vendor": vendor,
+                    "serial": serial,
+                    "description": full_desc,
+                }
+            )
 
         # Intel Gaudi: lshw classifies these as "network" (not "display"),
         # so they don't appear in lshw.gpus. Add them from hl-smi if not
@@ -291,12 +325,14 @@ class ModuleManager:
                     if gaudi_driver:
                         desc_parts.append(f"driver: habanalabs {gaudi_driver}")
                         desc_parts.append(f"SynapseAI: habanalabs {gaudi_driver}")
-                    items.append({
-                        "product": gdev.get("product", "Gaudi GPU"),
-                        "vendor": "Habana Labs (Intel)",
-                        "serial": gdev.get("serial"),
-                        "description": " | ".join(desc_parts),
-                    })
+                    items.append(
+                        {
+                            "product": gdev.get("product", "Gaudi GPU"),
+                            "vendor": "Habana Labs (Intel)",
+                            "serial": gdev.get("serial"),
+                            "description": " | ".join(desc_parts),
+                        }
+                    )
 
         return items
 
@@ -326,13 +362,15 @@ class ModuleManager:
             if driver:
                 desc_parts.append(f"driver: {driver}")
 
-            items.append({
-                "product": product,
-                "vendor": vendor,
-                "serial": None,
-                "description": " | ".join(p for p in desc_parts if p),
-                "businfo": businfo,
-            })
+            items.append(
+                {
+                    "product": product,
+                    "vendor": vendor,
+                    "serial": None,
+                    "description": " | ".join(p for p in desc_parts if p),
+                    "businfo": businfo,
+                }
+            )
 
         # Note: Intel Gaudi (Habana Labs) is now routed to GPUs via lshw.py,
         # not to accelerators. Gaudi enrichment (hl-smi serials, driver) happens
@@ -340,9 +378,11 @@ class ModuleManager:
         # (Pliops, FPGAs, QAT, custom hardware).
 
         if items:
-            logger.info("Detected %d accelerator(s): %s",
-                        len(items),
-                        ", ".join(f'{a["vendor"]} {a["product"]}' for a in items))
+            logger.info(
+                "Detected %d accelerator(s): %s",
+                len(items),
+                ", ".join(f"{a['vendor']} {a['product']}" for a in items),
+            )
 
         return items
 
@@ -359,8 +399,11 @@ class ModuleManager:
             return driver, cuda, gpu_info
         try:
             output = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=index,name,serial,driver_version",
-                 "--format=csv,noheader,nounits"],
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,name,serial,driver_version",
+                    "--format=csv,noheader,nounits",
+                ],
                 encoding="utf-8",
                 timeout=30,
             ).strip()
@@ -383,8 +426,11 @@ class ModuleManager:
         # CUDA version from nvidia-smi header (not available via --query-gpu)
         try:
             import re
+
             header = subprocess.check_output(
-                ["nvidia-smi"], encoding="utf-8", timeout=10,
+                ["nvidia-smi"],
+                encoding="utf-8",
+                timeout=10,
             )
             m = re.search(r"CUDA Version:\s*([0-9.]+)", header)
             if m:
@@ -401,7 +447,8 @@ class ModuleManager:
             try:
                 output = subprocess.check_output(
                     ["rocm-smi", "--showdriverversion"],
-                    encoding="utf-8", timeout=10,
+                    encoding="utf-8",
+                    timeout=10,
                 ).strip()
                 for line in output.splitlines():
                     if "Driver version" in line:
@@ -412,7 +459,9 @@ class ModuleManager:
         if is_tool("rocminfo"):
             try:
                 output = subprocess.check_output(
-                    ["rocminfo"], encoding="utf-8", timeout=10,
+                    ["rocminfo"],
+                    encoding="utf-8",
+                    timeout=10,
                 ).strip()
                 for line in output.splitlines():
                     if "Runtime Version" in line:
@@ -439,7 +488,9 @@ class ModuleManager:
         try:
             output = subprocess.check_output(
                 ["modinfo", "amdgpu", "-F", "version"],
-                encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                encoding="utf-8",
+                timeout=10,
+                stderr=subprocess.DEVNULL,
             ).strip()
             if output:
                 return output.splitlines()[0]
@@ -459,9 +510,12 @@ class ModuleManager:
         if is_tool("rocm-smi"):
             try:
                 import re
+
                 output = subprocess.check_output(
                     ["rocm-smi", "--showserial"],
-                    encoding="utf-8", timeout=15, stderr=subprocess.DEVNULL,
+                    encoding="utf-8",
+                    timeout=15,
+                    stderr=subprocess.DEVNULL,
                 ).strip()
                 # Parse "GPU[0] : Serial Number: XXXX" format
                 for m in re.finditer(r"GPU\[(\d+)\]\s*:\s*Serial Number:\s*(\S+)", output):
@@ -477,6 +531,7 @@ class ModuleManager:
         try:
             import os
             import glob
+
             for card_dir in sorted(glob.glob("/sys/class/drm/card[0-9]*/device/")):
                 serial_path = os.path.join(card_dir, "serial_number")
                 vendor_path = os.path.join(card_dir, "vendor")
@@ -517,14 +572,21 @@ class ModuleManager:
         driver_link = f"/sys/bus/pci/devices/{pci_addr}/driver"
         try:
             import os
+
             driver_path = os.readlink(driver_link)
             driver_name = os.path.basename(driver_path)
             # Get driver version from modinfo
             try:
-                version = subprocess.check_output(
-                    ["modinfo", driver_name, "-F", "version"],
-                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
-                ).strip().splitlines()[0]
+                version = (
+                    subprocess.check_output(
+                        ["modinfo", driver_name, "-F", "version"],
+                        encoding="utf-8",
+                        timeout=10,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    .strip()
+                    .splitlines()[0]
+                )
                 return f"{driver_name} {version}"
             except Exception:
                 return driver_name
@@ -552,7 +614,9 @@ class ModuleManager:
             try:
                 output = subprocess.check_output(
                     ["modinfo", "habanalabs", "-F", "version"],
-                    encoding="utf-8", timeout=10, stderr=subprocess.DEVNULL,
+                    encoding="utf-8",
+                    timeout=10,
+                    stderr=subprocess.DEVNULL,
                 ).strip()
                 if output:
                     driver = output.splitlines()[0]
@@ -564,17 +628,20 @@ class ModuleManager:
             try:
                 output = subprocess.check_output(
                     ["hl-smi", "-Q", "index,name,serial,bus_id", "-f", "csv,noheader"],
-                    encoding="utf-8", timeout=30,
+                    encoding="utf-8",
+                    timeout=30,
                 ).strip()
                 for line in output.splitlines():
                     parts = [p.strip() for p in line.split(",")]
                     if len(parts) >= 4:
-                        devices.append({
-                            "index": int(parts[0]),
-                            "product": parts[1],
-                            "serial": parts[2] if parts[2] not in ("N/A", "") else None,
-                            "businfo": parts[3],
-                        })
+                        devices.append(
+                            {
+                                "index": int(parts[0]),
+                                "product": parts[1],
+                                "serial": parts[2] if parts[2] not in ("N/A", "") else None,
+                                "businfo": parts[3],
+                            }
+                        )
             except Exception as e:
                 logger.debug("hl-smi query failed: %s", e)
 
@@ -591,14 +658,16 @@ class ModuleManager:
             if isinstance(size_gb, (int, float)):
                 size_gb = int(size_gb)
             product = dimm.get("product", "Unknown")
-            items.append({
-                "product": f"{product} {size_gb}GB" if size_gb else product,
-                "vendor": dimm.get("vendor", "Unknown"),
-                "serial": serial,
-                "slot": dimm.get("slot", ""),
-                "size_gb": size_gb,
-                "description": dimm.get("description", ""),
-            })
+            items.append(
+                {
+                    "product": f"{product} {size_gb}GB" if size_gb else product,
+                    "vendor": dimm.get("vendor", "Unknown"),
+                    "serial": serial,
+                    "slot": dimm.get("slot", ""),
+                    "size_gb": size_gb,
+                    "description": dimm.get("description", ""),
+                }
+            )
         return items
 
     # Device names that are never physical storage
@@ -721,7 +790,9 @@ class ModuleManager:
                 if not serial:
                     serial = (nvme_info.get("SerialNumber") or "").strip() or None
                 if not vendor:
-                    vendor = (nvme_info.get("Vendor") or nvme_info.get("Manufacturer") or "").strip() or None
+                    vendor = (
+                        nvme_info.get("Vendor") or nvme_info.get("Manufacturer") or ""
+                    ).strip() or None
                 if not size_bytes:
                     size_bytes = nvme_info.get("PhysicalSize") or nvme_info.get("UsedBytes")
                 if not rev:
@@ -737,16 +808,18 @@ class ModuleManager:
             # Build description from interface + rotational status
             description = self._build_storage_description(interface, rota)
 
-            items.append({
-                "product": model or f"Unknown ({name})",
-                "vendor": vendor or "Unknown",
-                "serial": serial,
-                "description": description,
-                "interface": interface,
-                "size_bytes": int(size_bytes) if size_bytes else None,
-                "firmware": rev,
-                "name": name,
-            })
+            items.append(
+                {
+                    "product": model or f"Unknown ({name})",
+                    "vendor": vendor or "Unknown",
+                    "serial": serial,
+                    "description": description,
+                    "interface": interface,
+                    "size_bytes": int(size_bytes) if size_bytes else None,
+                    "firmware": rev,
+                    "name": name,
+                }
+            )
 
         return items
 
@@ -814,12 +887,14 @@ class ModuleManager:
             if not vendor and product:
                 vendor = self._guess_vendor(product)
 
-            items.append({
-                "product": product,
-                "vendor": vendor or "Unknown",
-                "serial": serial,
-                "description": disk.get("description", ""),
-            })
+            items.append(
+                {
+                    "product": product,
+                    "vendor": vendor or "Unknown",
+                    "serial": serial,
+                    "description": disk.get("description", ""),
+                }
+            )
 
         return items
 
@@ -853,18 +928,22 @@ class ModuleManager:
             if any(gv in vendor_lower for gv in self._GPU_AS_NIC_VENDORS):
                 logger.debug(
                     "Skipping GPU-as-NIC: %s %s (%s)",
-                    vendor, product, iface.get("name", ""),
+                    vendor,
+                    product,
+                    iface.get("name", ""),
                 )
                 continue
 
             seen_macs.add(mac)
-            items.append({
-                "product": product,
-                "vendor": vendor,
-                "serial": mac,  # MAC as serial proxy
-                "description": iface.get("description", ""),
-                "name": iface.get("name", ""),
-            })
+            items.append(
+                {
+                    "product": product,
+                    "vendor": vendor,
+                    "serial": mac,  # MAC as serial proxy
+                    "description": iface.get("description", ""),
+                    "name": iface.get("name", ""),
+                }
+            )
 
         return items
 
@@ -873,6 +952,7 @@ class ModuleManager:
         items = []
         try:
             from netbox_agent import dmidecode
+
             dmi = self.server.dmi
             # Use numeric type ID 39 because _str2type has " Power Supply"
             # (with leading space), causing string lookup to fail.
@@ -885,12 +965,14 @@ class ModuleManager:
                     serial = None
                 if name in ("Not Specified", "To Be Filled By O.E.M."):
                     name = "Unknown PSU"
-                items.append({
-                    "product": f"{manufacturer} {name}".strip(),
-                    "vendor": manufacturer,
-                    "serial": serial,
-                    "description": "Power Supply",
-                })
+                items.append(
+                    {
+                        "product": f"{manufacturer} {name}".strip(),
+                        "vendor": manufacturer,
+                        "serial": serial,
+                        "description": "Power Supply",
+                    }
+                )
         except Exception as e:
             logger.warning("PSU detection failed: %s", e)
 
@@ -918,10 +1000,10 @@ class ModuleManager:
 
     # Model number prefixes → vendor (for models that don't contain the vendor name)
     _VENDOR_PREFIXES = (
-        ("st", "Seagate"),       # ST4000NM000A, ST8000NM000A
+        ("st", "Seagate"),  # ST4000NM000A, ST8000NM000A
         ("wdc ", "Western Digital"),  # WDC WD4003FFBX
         ("wdc_", "Western Digital"),
-        ("wd", "Western Digital"),   # WD4003FFBX
+        ("wd", "Western Digital"),  # WD4003FFBX
     )
 
     def _guess_vendor(self, product):
@@ -1006,7 +1088,9 @@ class ModuleManager:
             create_params["profile"] = profile.id
 
         mt = _api_retry(nb.dcim.module_types.create, create_params)
-        logger.info("Auto-created module type '%s / %s' (profile=%s)", vendor, product, profile_name)
+        logger.info(
+            "Auto-created module type '%s / %s' (profile=%s)", vendor, product, profile_name
+        )
         self._module_type_cache[cache_key] = mt
         return mt
 
@@ -1037,11 +1121,14 @@ class ModuleManager:
         for i in range(count):
             bay_name = f"{prefix}-{i}"
             if bay_name not in existing_names:
-                _api_retry(nb.dcim.module_bays.create, {
-                    "device": device.id,
-                    "name": bay_name,
-                    "position": bay_name,
-                })
+                _api_retry(
+                    nb.dcim.module_bays.create,
+                    {
+                        "device": device.id,
+                        "name": bay_name,
+                        "position": bay_name,
+                    },
+                )
                 logger.info("Created module bay '%s' on device '%s'", bay_name, device.name)
 
         # Re-fetch to get the complete list
@@ -1091,14 +1178,21 @@ class ModuleManager:
             return None
         results = list(_api_retry(nb.dcim.modules.filter, serial=serial))
         if len(results) > 1:
-            logger.warning("Duplicate serial '%s' found on %d modules — using first match", serial, len(results))
+            logger.warning(
+                "Duplicate serial '%s' found on %d modules — using first match",
+                serial,
+                len(results),
+            )
         return results[0] if results else None
 
     def _reparent_module(self, module, target_device, target_bay):
         """Move a module to a different device and bay."""
         logger.info(
             "Re-parenting module '%s' (serial=%s) → device '%s' bay '%s'",
-            module, module.serial, target_device.name, target_bay.name,
+            module,
+            module.serial,
+            target_device.name,
+            target_bay.name,
         )
         module.device = target_device.id
         module.module_bay = target_bay.id
@@ -1133,9 +1227,7 @@ class ModuleManager:
                 break
 
         if not target_bay:
-            logger.error(
-                "No free %s bay on spare device — admin must expand spare bays", prefix
-            )
+            logger.error("No free %s bay on spare device — admin must expand spare bays", prefix)
             return False
 
         self._reparent_module(module, spare, target_bay)
@@ -1145,7 +1237,9 @@ class ModuleManager:
         """If a bay is occupied, move its occupant to spare."""
         modules_in_bay = list(_api_retry(nb.dcim.modules.filter, module_bay_id=bay.id))
         for mod in modules_in_bay:
-            logger.info("Bay '%s' occupied by module (serial=%s) — moving to spare", bay.name, mod.serial)
+            logger.info(
+                "Bay '%s' occupied by module (serial=%s) — moving to spare", bay.name, mod.serial
+            )
             self._move_to_spare(mod, category)
 
     # ------------------------------------------------------------------ #
@@ -1195,7 +1289,9 @@ class ModuleManager:
             if not bay:
                 logger.warning(
                     "No bay available at index %d for %s on %s",
-                    idx, prefix, self.device.name,
+                    idx,
+                    prefix,
+                    self.device.name,
                 )
                 continue
 
@@ -1212,7 +1308,9 @@ class ModuleManager:
                     # Check bay assignment
                     mod_bay_name = None
                     if mod.module_bay:
-                        mod_bay_name = getattr(mod.module_bay, "name", None) or getattr(mod.module_bay, "display", None)
+                        mod_bay_name = getattr(mod.module_bay, "name", None) or getattr(
+                            mod.module_bay, "display", None
+                        )
                     if mod_bay_name != bay.name:
                         self._vacate_bay(bay, category)
                         mod.module_bay = bay.id
@@ -1221,7 +1319,11 @@ class ModuleManager:
                     # Check module type
                     mod_mt_id = None
                     if mod.module_type:
-                        mod_mt_id = mod.module_type.id if hasattr(mod.module_type, "id") else mod.module_type
+                        mod_mt_id = (
+                            mod.module_type.id
+                            if hasattr(mod.module_type, "id")
+                            else mod.module_type
+                        )
                     if mod_mt_id != module_type.id:
                         mod.module_type = module_type.id
                         updated = True
@@ -1241,7 +1343,11 @@ class ModuleManager:
                     # Update module type if changed
                     mod_mt_id = None
                     if remote_mod.module_type:
-                        mod_mt_id = remote_mod.module_type.id if hasattr(remote_mod.module_type, "id") else remote_mod.module_type
+                        mod_mt_id = (
+                            remote_mod.module_type.id
+                            if hasattr(remote_mod.module_type, "id")
+                            else remote_mod.module_type
+                        )
                     if mod_mt_id != module_type.id:
                         remote_mod.module_type = module_type.id
                         _api_retry(remote_mod.save)
@@ -1249,18 +1355,24 @@ class ModuleManager:
 
                 # Not found anywhere — create new
                 self._vacate_bay(bay, category)
-                new_mod = _api_retry(nb.dcim.modules.create, {
-                    "device": self.device.id,
-                    "module_bay": bay.id,
-                    "module_type": module_type.id,
-                    "serial": serial,
-                    "status": "active",
-                    "custom_fields": self._default_module_custom_fields(),
-                })
+                new_mod = _api_retry(
+                    nb.dcim.modules.create,
+                    {
+                        "device": self.device.id,
+                        "module_bay": bay.id,
+                        "module_type": module_type.id,
+                        "serial": serial,
+                        "status": "active",
+                        "custom_fields": self._default_module_custom_fields(),
+                    },
+                )
                 matched_module_ids.add(new_mod.id)
                 logger.info(
                     "Created module %s serial=%s on %s bay=%s",
-                    item["product"], serial, self.device.name, bay.name,
+                    item["product"],
+                    serial,
+                    self.device.name,
+                    bay.name,
                 )
 
             else:
@@ -1273,23 +1385,32 @@ class ModuleManager:
                     # Update module type if changed
                     mod_mt_id = None
                     if mod.module_type:
-                        mod_mt_id = mod.module_type.id if hasattr(mod.module_type, "id") else mod.module_type
+                        mod_mt_id = (
+                            mod.module_type.id
+                            if hasattr(mod.module_type, "id")
+                            else mod.module_type
+                        )
                     if mod_mt_id != module_type.id:
                         mod.module_type = module_type.id
                         _api_retry(mod.save)
                         logger.info("Updated module type at %s on %s", bay.name, self.device.name)
                 else:
-                    new_mod = _api_retry(nb.dcim.modules.create, {
-                        "device": self.device.id,
-                        "module_bay": bay.id,
-                        "module_type": module_type.id,
-                        "status": "active",
-                        "custom_fields": self._default_module_custom_fields(),
-                    })
+                    new_mod = _api_retry(
+                        nb.dcim.modules.create,
+                        {
+                            "device": self.device.id,
+                            "module_bay": bay.id,
+                            "module_type": module_type.id,
+                            "status": "active",
+                            "custom_fields": self._default_module_custom_fields(),
+                        },
+                    )
                     matched_module_ids.add(new_mod.id)
                     logger.info(
                         "Created module %s (no serial) on %s bay=%s",
-                        item["product"], self.device.name, bay.name,
+                        item["product"],
+                        self.device.name,
+                        bay.name,
                     )
 
         # Step 3: Move unmatched existing modules to spare
@@ -1298,7 +1419,8 @@ class ModuleManager:
                 if mod.id not in matched_module_ids:
                     logger.info(
                         "Module serial=%s no longer detected on %s — moving to spare",
-                        mod.serial, self.device.name,
+                        mod.serial,
+                        self.device.name,
                     )
                     self._move_to_spare(mod, category)
 
@@ -1320,7 +1442,9 @@ class ModuleManager:
             logger.error("Device not found in NetBox — cannot sync modules")
             return False
 
-        logger.info("Starting module sync for device '%s' (id=%d)", self.device.name, self.device.id)
+        logger.info(
+            "Starting module sync for device '%s' (id=%d)", self.device.name, self.device.id
+        )
 
         # Skip PSU detection when dmidecode is unavailable
         skip_psu = deps is not None and not deps.get("dmidecode", True)

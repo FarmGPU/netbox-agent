@@ -63,9 +63,7 @@ class StateManager:
         os.makedirs(self.state_dir, exist_ok=True)
 
         # Atomic write: write to temp file, then rename
-        fd, tmp_path = tempfile.mkstemp(
-            dir=self.state_dir, prefix=".state_", suffix=".tmp"
-        )
+        fd, tmp_path = tempfile.mkstemp(dir=self.state_dir, prefix=".state_", suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
                 json.dump(state, f, indent=2, sort_keys=True)

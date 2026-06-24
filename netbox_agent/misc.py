@@ -46,9 +46,7 @@ def get_device_type(model, manufacturer=None):
     device_type = nb.dcim.device_types.get(model=model)
     if device_type is None and manufacturer:
         mfr = get_or_create_manufacturer(manufacturer)
-        logging.info(
-            'Auto-creating DeviceType "%s" (manufacturer: %s)', model, manufacturer
-        )
+        logging.info('Auto-creating DeviceType "%s" (manufacturer: %s)', model, manufacturer)
         device_type = nb.dcim.device_types.create(
             model=model,
             slug=slugify(model),
@@ -56,8 +54,9 @@ def get_device_type(model, manufacturer=None):
         )
     if device_type is None:
         raise Exception(
-            'DeviceType "{}" does not exist and no manufacturer provided'
-            " for auto-creation".format(model)
+            'DeviceType "{}" does not exist and no manufacturer provided for auto-creation'.format(
+                model
+            )
         )
     return device_type
 

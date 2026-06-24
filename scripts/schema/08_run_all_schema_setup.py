@@ -22,7 +22,10 @@ SCRIPTS = [
     ("03_create_custom_fields", "Create custom fields"),
     ("04_create_module_type_profiles", "Create module type profiles"),
     ("05_create_module_types", "Create module types"),
-    ("06_update_device_types_module_bay_templates", "Update device types with module bay templates"),
+    (
+        "06_update_device_types_module_bay_templates",
+        "Update device types with module bay templates",
+    ),
     ("07_create_spare_inventory_device", "Create spare inventory device"),
 ]
 

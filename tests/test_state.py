@@ -11,7 +11,6 @@ from netbox_agent.state import StateManager
 
 
 class TestStateManager:
-
     def test_save_and_load_state(self, tmp_path):
         """Round-trip: save → load returns same data."""
         sm = StateManager(str(tmp_path))

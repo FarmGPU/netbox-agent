@@ -45,7 +45,9 @@ def run(nb):
     for cs_def in CHOICE_SETS:
         existing = nb.extras.custom_field_choice_sets.get(name=cs_def["name"])
         if existing:
-            logger.info("Choice set '%s' already exists (id=%d) — skipping", cs_def["name"], existing.id)
+            logger.info(
+                "Choice set '%s' already exists (id=%d) — skipping", cs_def["name"], existing.id
+            )
             continue
 
         result = nb.extras.custom_field_choice_sets.create(cs_def)

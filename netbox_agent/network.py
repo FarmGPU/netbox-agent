@@ -101,8 +101,9 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
     vendor = (ethtool_data.get("transceiver_vendor") or "").strip()
     part_number = (ethtool_data.get("transceiver_part_number") or "").strip()
     serial = (ethtool_data.get("transceiver_serial") or "").strip()
-    form_factor = (ethtool_data.get("transceiver_type") or
-                   ethtool_data.get("form_factor") or "").strip()
+    form_factor = (
+        ethtool_data.get("transceiver_type") or ethtool_data.get("form_factor") or ""
+    ).strip()
 
     # Need at least vendor or part number to create a module type
     if not vendor and not part_number:
@@ -130,13 +131,13 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
         # --- Transceiver ModuleType ---
         module_type = None
         if part_number:
-            existing = list(nb.dcim.module_types.filter(
-                part_number=part_number, manufacturer_id=mfr.id))
+            existing = list(
+                nb.dcim.module_types.filter(part_number=part_number, manufacturer_id=mfr.id)
+            )
             if existing:
                 module_type = existing[0]
         if not module_type:
-            existing = list(nb.dcim.module_types.filter(
-                model=model, manufacturer_id=mfr.id))
+            existing = list(nb.dcim.module_types.filter(model=model, manufacturer_id=mfr.id))
             if existing:
                 module_type = existing[0]
         if not module_type:
@@ -151,24 +152,27 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
         if nic_module:
             # Each per-port NIC module gets one XCVR child bay
             xcvr_bay_name = "XCVR-0"
-            xcvr_bays = list(nb.dcim.module_bays.filter(
-                module_id=nic_module.id, name=xcvr_bay_name))
+            xcvr_bays = list(
+                nb.dcim.module_bays.filter(module_id=nic_module.id, name=xcvr_bay_name)
+            )
             if xcvr_bays:
                 bay = xcvr_bays[0]
             else:
                 # NetBox requires device even for module-level bays
                 bay = nb.dcim.module_bays.create(
-                    device=device_id, module=nic_module.id,
-                    name=xcvr_bay_name)
-                logging.info("Created XCVR bay: %s on NIC module %s (id=%s)",
-                             xcvr_bay_name, nic_module.module_type, nic_module.id)
+                    device=device_id, module=nic_module.id, name=xcvr_bay_name
+                )
+                logging.info(
+                    "Created XCVR bay: %s on NIC module %s (id=%s)",
+                    xcvr_bay_name,
+                    nic_module.module_type,
+                    nic_module.id,
+                )
         else:
             # Legacy fallback: device-level bay
             bay_name = "%s-xcvr" % interface.name
-            bays = list(nb.dcim.module_bays.filter(
-                device_id=device_id, name=bay_name))
-            bay = bays[0] if bays else nb.dcim.module_bays.create(
-                device=device_id, name=bay_name)
+            bays = list(nb.dcim.module_bays.filter(device_id=device_id, name=bay_name))
+            bay = bays[0] if bays else nb.dcim.module_bays.create(device=device_id, name=bay_name)
 
         # --- Transceiver Module ---
         existing_modules = list(nb.dcim.modules.filter(module_bay_id=bay.id))
@@ -183,14 +187,18 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
                 dirty = True
             if dirty:
                 module.save()
-                logging.info("Updated transceiver: %s %s (SN:%s) on %s",
-                             vendor, model, serial, interface.name)
+                logging.info(
+                    "Updated transceiver: %s %s (SN:%s) on %s",
+                    vendor,
+                    model,
+                    serial,
+                    interface.name,
+                )
             return
 
         # Check by serial — optic may have moved bays
         if serial:
-            by_sn = list(nb.dcim.modules.filter(
-                serial=serial, device_id=device_id))
+            by_sn = list(nb.dcim.modules.filter(serial=serial, device_id=device_id))
             if by_sn:
                 module = by_sn[0]
                 module.module_bay = bay.id
@@ -209,12 +217,16 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
         )
         logging.info(
             "Created transceiver: %s %s (SN:%s) on %s",
-            vendor, model, serial, interface.name,
+            vendor,
+            model,
+            serial,
+            interface.name,
         )
 
     except Exception:
         logging.debug(
-            "Failed to sync transceiver for %s", interface.name,
+            "Failed to sync transceiver for %s",
+            interface.name,
             exc_info=True,
         )
 
@@ -246,8 +258,12 @@ def _build_transceiver_description(ethtool_data):
         parts.append(vendor_str)
 
     # Cable length
-    for length_key in ("transceiver_length_copper", "transceiver_length_om3",
-                       "transceiver_length_om4", "transceiver_length_smf"):
+    for length_key in (
+        "transceiver_length_copper",
+        "transceiver_length_om3",
+        "transceiver_length_om4",
+        "transceiver_length_smf",
+    ):
         length = ethtool_data.get(length_key, "").strip()
         if length and length != "0m" and length != "0":
             connector = ethtool_data.get("transceiver_connector", "").strip()
@@ -376,7 +392,9 @@ class Network(object):
                 if len(mac) != 17:
                     logging.debug(
                         "Skipping non-Ethernet MAC on %s: %s (%d chars)",
-                        interface, mac, len(mac),
+                        interface,
+                        mac,
+                        len(mac),
                     )
                     mac = None
 
@@ -784,8 +802,9 @@ class Network(object):
             netbox_ip.tenant = self.tenant.id
             dirty = True
         if dirty:
-            logging.info("Enriching IP %s: dns_name=%s tenant=%s",
-                         netbox_ip.address, dns, self.tenant)
+            logging.info(
+                "Enriching IP %s: dns_name=%s tenant=%s", netbox_ip.address, dns, self.tenant
+            )
             netbox_ip.save()
 
     def _enrich_ip(self, netbox_ip, interface):
@@ -836,7 +855,8 @@ class Network(object):
                 if managed_by and managed_by != "netbox-agent":
                     logging.debug(
                         "Skipping deletion of '%s' (managed_by=%s)",
-                        nic.name, managed_by,
+                        nic.name,
+                        managed_by,
                     )
                     continue
                 logging.info(
@@ -886,7 +906,8 @@ class Network(object):
                             if "oob_ip" in err_str:
                                 logging.warning(
                                     "oob_ip validation failed during primary_ip4 clear — "
-                                    "also clearing oob_ip: %s", e,
+                                    "also clearing oob_ip: %s",
+                                    e,
                                 )
                                 fresh_device.oob_ip = None
                                 fresh_device.save()
@@ -957,8 +978,11 @@ class Network(object):
                     mac_objs = self.update_interface_macs(interface, [nic["mac"]])
                     # Find the MAC object matching nic["mac"] and set as primary
                     primary_mac_id = None
-                    for mac_obj in (mac_objs or []):
-                        if mac_obj.mac_address and mac_obj.mac_address.upper() == nic["mac"].upper():
+                    for mac_obj in mac_objs or []:
+                        if (
+                            mac_obj.mac_address
+                            and mac_obj.mac_address.upper() == nic["mac"].upper()
+                        ):
                             primary_mac_id = mac_obj.id
                             break
                     current_primary = getattr(interface, "primary_mac_address", None)
