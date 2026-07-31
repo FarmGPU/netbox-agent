@@ -534,9 +534,18 @@ class ServerBase:
         )
 
         # Build custom fields with defaults for new fields
+        #
+        # No "owner" here: no instance defines that custom field. NetBox 4.5
+        # accepted the unknown key and quietly persisted it into
+        # custom_field_data (60 production devices carry the junk today);
+        # 4.6 rejects the whole write —
+        #   400 {'custom_fields': {'owner': "Custom field 'owner' does not
+        #        exist for this object type."}}
+        # (extras/api/customfields.py:94, a check absent from the 4.5 tree).
+        # The near-namesake `hardware_owner` is NOT a rename target: it is an
+        # object field referencing tenancy.tenant, so a string cannot be
+        # written to it, and it is populated by something other than this agent.
         cf = dict(self.custom_fields)
-        default_owner = getattr(config.device, "default_owner", "FarmGPU")
-        cf.setdefault("owner", default_owner)
         cf.setdefault("environment", "Production")
         cf.setdefault("record_completeness", "incomplete")
 
@@ -581,11 +590,11 @@ class ServerBase:
         """
         cf = dict(server.custom_fields or {})
         changed = False
-        default_owner = getattr(config.device, "default_owner", "FarmGPU")
 
-        if not cf.get("owner"):
-            cf["owner"] = default_owner
-            changed = True
+        # "owner" is deliberately not backfilled — see _netbox_create_server.
+        # This path matters more than the create path: it runs on every sync of
+        # every existing device, so on 4.6 it would fail the entire fleet, not
+        # just new enrollments.
         if not cf.get("environment"):
             cf["environment"] = "Production"
             changed = True
@@ -597,7 +606,7 @@ class ServerBase:
             logging.info(
                 "Backfilling required custom fields on '%s': %s",
                 server.name,
-                {k: cf[k] for k in ("owner", "environment", "record_completeness")},
+                {k: cf[k] for k in ("environment", "record_completeness")},
             )
             server.custom_fields = cf
             server.save()

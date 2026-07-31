@@ -1167,8 +1167,9 @@ class ModuleManager:
 
     def _default_module_custom_fields(self):
         """Return custom_fields dict for new module creation."""
+        # No "owner": defined on no instance, and NetBox 4.6 rejects the entire
+        # write for an unknown key. See server.py::_netbox_create_server.
         return {
-            "owner": self.default_owner,
             "record_completeness": "incomplete",
         }
 

@@ -329,7 +329,9 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
             module_bay=bay.id,
             module_type=module_type.id,
             serial=serial or "",
-            custom_fields={"owner": "FarmGPU"},
+            # No custom_fields: "owner" is defined on no instance and NetBox 4.6
+            # rejects the whole write for an unknown key. See
+            # server.py::_netbox_create_server.
         )
         logging.info(
             "Created transceiver: %s %s (SN:%s) on %s",
