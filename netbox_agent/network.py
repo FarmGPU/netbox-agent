@@ -9,6 +9,7 @@ from pathlib import Path
 import netifaces
 from netaddr import IPAddress
 from packaging import version
+from pynetbox.core.query import RequestError
 
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
@@ -1523,14 +1524,37 @@ class ServerNetwork(Network):
                     )
                 )
                 return nb_server_interface
-        cable = nb.dcim.cables.create(
-            a_terminations=[
-                {"object_type": "dcim.interface", "object_id": nb_server_interface.id},
-            ],
-            b_terminations=[
-                {"object_type": "dcim.interface", "object_id": nb_switch_interface.id},
-            ],
-        )
+        try:
+            cable = nb.dcim.cables.create(
+                a_terminations=[
+                    {"object_type": "dcim.interface", "object_id": nb_server_interface.id},
+                ],
+                b_terminations=[
+                    {"object_type": "dcim.interface", "object_id": nb_switch_interface.id},
+                ],
+            )
+        except RequestError as exc:
+            # Cabling is enrichment; inventory is the product. A cable NetBox
+            # refuses must never abort the run — the exception used to unwind
+            # all the way out of netbox_create_or_update, discarding every
+            # module, interface and IP already gathered, and leaving the device
+            # with no heartbeat at all.
+            #
+            # Most common cause: NetBox rejects a termination whose interface
+            # type is in NONCONNECTABLE_IFACE_TYPES — virtual + wireless
+            # (dcim/models/cables.py:574, dcim/constants.py:74) — with
+            # 400 "Cables cannot be terminated to Virtual interfaces". A VLAN
+            # subinterface such as `1s0f0.234` is the usual trigger.
+            logging.error(
+                "Failed to cable {interface} to {switch_interface} on {switch_ip}: "
+                "{err} — continuing sync without this cable".format(
+                    interface=nb_server_interface.name,
+                    switch_interface=switch_interface,
+                    switch_ip=switch_ip,
+                    err=exc,
+                )
+            )
+            return nb_server_interface
         nb_server_interface.cable = cable
         logging.info(
             "Connected interface {interface} with {switch_interface} of {switch_ip}".format(
