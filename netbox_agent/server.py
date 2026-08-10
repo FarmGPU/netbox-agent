@@ -11,6 +11,7 @@ import netbox_agent.dmidecode as dmidecode
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
 from netbox_agent.dependencies import missing_deps_string
+from netbox_agent.ipmi import IPMI
 from netbox_agent.location import Datacenter, Rack, Tenant
 from netbox_agent.misc import (
     create_netbox_tags,
@@ -533,9 +534,18 @@ class ServerBase:
         )
 
         # Build custom fields with defaults for new fields
+        #
+        # No "owner" here: no instance defines that custom field. NetBox 4.5
+        # accepted the unknown key and quietly persisted it into
+        # custom_field_data (60 production devices carry the junk today);
+        # 4.6 rejects the whole write —
+        #   400 {'custom_fields': {'owner': "Custom field 'owner' does not
+        #        exist for this object type."}}
+        # (extras/api/customfields.py:94, a check absent from the 4.5 tree).
+        # The near-namesake `hardware_owner` is NOT a rename target: it is an
+        # object field referencing tenancy.tenant, so a string cannot be
+        # written to it, and it is populated by something other than this agent.
         cf = dict(self.custom_fields)
-        default_owner = getattr(config.device, "default_owner", "FarmGPU")
-        cf.setdefault("owner", default_owner)
         cf.setdefault("environment", "Production")
         cf.setdefault("record_completeness", "incomplete")
 
@@ -580,11 +590,11 @@ class ServerBase:
         """
         cf = dict(server.custom_fields or {})
         changed = False
-        default_owner = getattr(config.device, "default_owner", "FarmGPU")
 
-        if not cf.get("owner"):
-            cf["owner"] = default_owner
-            changed = True
+        # "owner" is deliberately not backfilled — see _netbox_create_server.
+        # This path matters more than the create path: it runs on every sync of
+        # every existing device, so on 4.6 it would fail the entire fleet, not
+        # just new enrollments.
         if not cf.get("environment"):
             cf["environment"] = "Production"
             changed = True
@@ -596,7 +606,7 @@ class ServerBase:
             logging.info(
                 "Backfilling required custom fields on '%s': %s",
                 server.name,
-                {k: cf[k] for k in ("owner", "environment", "record_completeness")},
+                {k: cf[k] for k in ("environment", "record_completeness")},
             )
             server.custom_fields = cf
             server.save()
@@ -637,7 +647,10 @@ class ServerBase:
 
         # Validate: must be exactly 4 alphanumeric chars, not a placeholder
         if tag and tag not in _ASSET_TAG_PLACEHOLDERS and _ASSET_TAG_RE.match(tag):
-            return tag.upper()
+            # Asset tags are lowercase base36 by convention — matches the
+            # allocator in netbox-workers (enrollment/asset_tag.py) and the
+            # existing fleet in NetBox. Do NOT uppercase.
+            return tag.lower()
         return None
 
     def get_netbox_server(self, expansion=False):
@@ -843,13 +856,28 @@ class ServerBase:
             server.asset_tag = local_asset_tag
             server.save()
         elif local_asset_tag and existing_tag and local_asset_tag != existing_tag:
-            logging.warning(
-                "Asset tag mismatch on '%s': NetBox=%s, local=%s "
-                "(keeping NetBox value — BMC API is authoritative)",
-                server.name,
-                existing_tag,
-                local_asset_tag,
-            )
+            if local_asset_tag.lower() == existing_tag.lower():
+                # Same tag, different case only — normalize to the lowercase
+                # convention. This is NOT the FRU/Redfish-divergence case the
+                # warning below guards against; it just heals legacy uppercase
+                # values (e.g. tags written before get_asset_tag stopped
+                # uppercasing). Tag identity is unchanged.
+                logging.info(
+                    "Normalizing asset_tag case on '%s': %s -> %s",
+                    server.name,
+                    existing_tag,
+                    local_asset_tag,
+                )
+                server.asset_tag = local_asset_tag
+                server.save()
+            else:
+                logging.warning(
+                    "Asset tag mismatch on '%s': NetBox=%s, local=%s "
+                    "(keeping NetBox value — BMC API is authoritative)",
+                    server.name,
+                    existing_tag,
+                    local_asset_tag,
+                )
 
         logging.debug("Updating Server...")
 
@@ -882,6 +910,36 @@ class ServerBase:
                     self.power.report_power_consumption()
                 except Exception as e:
                     logging.warning("Power consumption reporting failed: %s", e)
+            # update virtualization cluster and virtual machines
+            # Auto-detect Proxmox: assign to cluster from corosync.conf
+            # without requiring config.virtual.hypervisor to be set.
+            if self._is_proxmox_host() and not config.virtual.hypervisor:
+                cluster_name = self._read_proxmox_cluster_name()
+                if cluster_name:
+                    cluster = nb.virtualization.clusters.get(name=cluster_name)
+                    if cluster:
+                        nb_server = self.get_netbox_server()
+                        if nb_server and getattr(nb_server, 'cluster', None) != cluster:
+                            nb_server.cluster = cluster.id
+                            nb_server.save()
+                            logging.info(
+                                "Auto-assigned Proxmox host '%s' to cluster '%s'",
+                                nb_server.name, cluster_name,
+                            )
+                    else:
+                        logging.warning(
+                            "Proxmox cluster '%s' not found in NetBox — "
+                            "create it first or set virtual.cluster_name",
+                            cluster_name,
+                        )
+            elif config.virtual.hypervisor and (
+                config.register or config.update_all or config.update_hypervisor
+            ):
+                self.hypervisor = Hypervisor(server=self)
+                self.hypervisor.create_or_update_device_cluster()
+                if config.virtual.list_guests_cmd:
+                    self.hypervisor.create_or_update_device_virtual_machines()
+
         expansion = nb.dcim.devices.get(serial=self.get_expansion_service_tag())
         if self.own_expansion_slot() and config.expansion_as_device:
             logging.debug("Update Server expansion...")
@@ -940,9 +998,24 @@ class ServerBase:
         # Set via config: sync_cadence (CLI --sync-cadence or YAML sync_cadence).
         local_cf["agent_cadence"] = getattr(config, "sync_cadence", 86400)
 
-        if server.custom_fields != local_cf:
-            server.custom_fields = local_cf
-            update += 1
+        # Merge agent-owned CFs into the existing dict instead of replacing
+        # the whole thing. Other workers (vast-sync, proxmox-sync,
+        # status-manager, bmc-scan) write their own CFs (last_vast_sync,
+        # vmid, last_bmc_seen, managed_by, etc.) — replacing the dict
+        # silently dropped them every agent run. Update only the keys the
+        # agent owns; preserve everything else.
+        #
+        # Always bump `update` so server.save() below fires this cycle.
+        # last_agent_sync and friends are stamped fresh every run, so a
+        # skipped save loses the heartbeat. Observed on turnip06: once
+        # status_manager transitioned the device to active, no other
+        # tracked field (hostname/serial/platform/status) changed, the
+        # save was skipped, and last_agent_sync stayed at the previous
+        # cycle's value — making status_manager flag the agent STALE
+        # despite the timer firing on schedule.
+        existing_cf = dict(server.custom_fields or {})
+        server.custom_fields = {**existing_cf, **local_cf}
+        update += 1
 
         # Transition device to "active" on successful agent sync.
         # Only transition from inventory/staged/offline — never override
@@ -1031,10 +1104,21 @@ class ServerBase:
             server.oob_ip = None
             oob_update = True
 
-        # Set oob_ip to the IPMI interface IP
+        # Set oob_ip to any IP attached to a mgmt_only interface (IPMI on
+        # standard servers, oob_net0 on BlueField DPUs, BMC-port on any
+        # future class). The legacy `display == "IPMI"` check is kept as
+        # a fallback for IPs whose nested assigned_object representation
+        # doesn't surface mgmt_only — should be rare, since the agent
+        # itself sets mgmt_only=True on IPMI ifaces it creates.
         if not oob_update:
             for ip in myips:
-                if ip.assigned_object and ip.assigned_object.display == "IPMI" and ip != server.oob_ip:
+                if not ip.assigned_object or ip == server.oob_ip:
+                    continue
+                ao = ip.assigned_object
+                is_mgmt = bool(getattr(ao, "mgmt_only", False))
+                if not is_mgmt and getattr(ao, "display", None) == "IPMI":
+                    is_mgmt = True
+                if is_mgmt:
                     server.oob_ip = ip.id
                     oob_update = True
                     break

@@ -8,6 +8,7 @@ module type auto-creation with typed profiles.
 
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -79,6 +80,75 @@ class ModuleManager:
     # ------------------------------------------------------------------ #
     #  Hardware Detection
     # ------------------------------------------------------------------ #
+
+    # PCI ids of base-class 0x08 (System peripheral) devices we DO want to
+    # enroll despite the topology-stub filter. Format: "vendor:device" lower-hex.
+    # Empty since SW-244: BF3 SoC mgmt is no longer enrolled as a Module
+    # (DPUs are tracked as first-class Devices, role=DPU, per SW-240/SW-241).
+    # Hook retained for future allowlisting needs.
+    _PCI_STUB_ALLOWLIST = frozenset()
+
+    # Module-type model substrings that mark known orphans from pre-filter
+    # agent runs (INF-321). Their detection paths are gated upstream now,
+    # so any record matching these patterns is permanent zombie state —
+    # never going to be re-detected, never moved to spare cleanly because
+    # serial collisions can confuse the per-category match (see anaheim15
+    # NIC-21 case). Pruned by `_prune_and_renumber_bays` on every cycle.
+    #
+    # Patterns must be specific enough that real hardware cannot match.
+    # Verified via fleet audit 2026-05-06: zero false positives across
+    # ~6000 modules.  Add new patterns only after the same audit.
+    _FILTERED_ORPHAN_PATTERNS = (
+        "Virtual Function",                    # SR-IOV VFs (Mellanox/Intel)
+        "RCEC",                                # PCIe Root Complex Event Collector stubs
+        "C620 Series Chipset Family MROM",     # Intel chipset memory-mapped ROM
+        "PnP device",                          # ACPI/PnP topology artifacts
+        "BlueField-3 integrated ConnectX-7",   # mt-92 — chassis-host NIC artifact (SW-244)
+        "BlueField-3 SoC Management",          # mt-309 — chassis-host accelerator artifact (SW-244)
+        "BlueField-3 DPU",                     # mt-170 — legacy SW-122 artifact (SW-244)
+    )
+
+    @staticmethod
+    def _pci_addr_from_businfo(businfo: str) -> str:
+        """Extract '0000:41:00.0' from lshw businfo 'pci@0000:41:00.0'."""
+        if not businfo:
+            return ""
+        return businfo.split("@", 1)[-1] if "@" in businfo else businfo
+
+    def _is_sriov_vf(self, businfo: str) -> bool:
+        """True iff the PCI device is an SR-IOV virtual function.
+
+        sysfs exposes /sys/bus/pci/devices/<addr>/physfn iff the device is a VF;
+        the symlink points back to the parent physical function. Cleaner than
+        scraping lspci output.
+        """
+        addr = self._pci_addr_from_businfo(businfo)
+        if not addr:
+            return False
+        return os.path.exists(f"/sys/bus/pci/devices/{addr}/physfn")
+
+    def _is_pcie_topology_stub(self, businfo: str) -> bool:
+        """True iff the PCI device is a topology stub with no operational meaning.
+
+        Filters base class 0x08 (System peripheral) — covers Turin RCEC, IOMMU
+        stubs, DMA controllers, etc. Allowlists `_PCI_STUB_ALLOWLIST` so real
+        hardware that happens to use class 0x08 (e.g. BF3 SoC mgmt) survives.
+        """
+        addr = self._pci_addr_from_businfo(businfo)
+        if not addr:
+            return False
+        try:
+            with open(f"/sys/bus/pci/devices/{addr}/class") as f:
+                class_hex = f.read().strip()  # e.g. "0x080700"
+            if not class_hex.lower().startswith("0x08"):
+                return False
+            with open(f"/sys/bus/pci/devices/{addr}/vendor") as f:
+                vendor = f.read().strip().lower().removeprefix("0x")
+            with open(f"/sys/bus/pci/devices/{addr}/device") as f:
+                device = f.read().strip().lower().removeprefix("0x")
+            return f"{vendor}:{device}" not in self._PCI_STUB_ALLOWLIST
+        except (FileNotFoundError, PermissionError, OSError):
+            return False
 
     # Vendor ID normalization (from SILO cpu.py)
     _INTEL_ALIASES = {"genuineintel", "intel", "intel(r) corporation", "intel corporation", "intel corp."}
@@ -218,6 +288,12 @@ class ModuleManager:
             description = gpu.get("description", "")
             businfo = gpu.get("businfo", "")
 
+            # Skip PCIe topology stubs (e.g. AMD Turin RCEC) that lshw lumps in
+            # with display/3D devices. INF-321.
+            if self._is_pcie_topology_stub(businfo):
+                logger.debug("Skipping PCIe topology stub: %s %s (%s)", vendor, product, businfo)
+                continue
+
             # Skip BMC/onboard VGA controllers
             if vendor_lower in self._SKIP_GPU_VENDORS:
                 logger.debug("Skipping onboard VGA: %s %s", vendor, product)
@@ -323,6 +399,11 @@ class ModuleManager:
             vendor = acc.get("vendor", "Unknown")
             businfo = acc.get("businfo", "")
             description = acc.get("description", "")
+
+            # Skip PCIe topology stubs (e.g. AMD Turin RCEC). INF-321.
+            if self._is_pcie_topology_stub(businfo):
+                logger.debug("Skipping PCIe topology stub: %s %s (%s)", vendor, product, businfo)
+                continue
 
             # Get driver info from sysfs
             driver = self._get_driver_for_pci_device(businfo)
@@ -716,9 +797,16 @@ class ModuleManager:
             size_bytes = blk.get("size")
             rev = (blk.get("rev") or "").strip() or None
 
-            # Treat placeholder serials as missing
-            if serial in ("_", "0", "unknown", "N/A", "UNKNOWN"):
+            # Treat placeholder serials as missing.
+            # "SSN" / "ModelNumber" appear as literal values when an NVMe
+            # drive's identify response is malformed (failed drive returns
+            # the spec field names instead of values). Combined with the
+            # "no model and no serial → skip" rule below, this filters out
+            # drives that can't be reliably identified.
+            if serial in ("_", "0", "unknown", "N/A", "UNKNOWN", "SSN"):
                 serial = None
+            if model == "ModelNumber":
+                model = None
 
             # For NVMe devices, read identity from sysfs controller
             # (more reliable than lsblk — works even when NVMe char device is locked)
@@ -883,6 +971,12 @@ class ModuleManager:
             if not mac:
                 continue
 
+            # Skip SR-IOV virtual functions — they're software clones of a
+            # parent NIC, not separate hardware. INF-321.
+            if self._is_sriov_vf(businfo):
+                logger.debug("Skipping SR-IOV VF: %s %s (%s)", vendor, product, businfo)
+                continue
+
             # Skip InfiniBand interfaces — GUIDs are longer than Ethernet MACs
             # Ethernet MACs: 17 chars (xx:xx:xx:xx:xx:xx)
             # IB GUIDs: 20+ bytes, often with extra octets
@@ -894,6 +988,14 @@ class ModuleManager:
             vendor_lower = vendor.lower()
             if any(gv in vendor_lower for gv in self._GPU_AS_NIC_VENDORS):
                 logger.debug("Skipping GPU-as-NIC: %s %s", vendor, product)
+                continue
+
+            # Skip BlueField NICs — DPUs are tracked as Devices (role=DPU),
+            # not Modules. See SW-240 / SW-241. Broad "bluefield" substring
+            # catches BF3 + future BF generations without per-model maintenance.
+            product_lower = (product or "").lower()
+            if "bluefield" in product_lower:
+                logger.debug("Skipping BlueField NIC: %s %s (%s)", vendor, product, businfo)
                 continue
 
             # Group by PCI card — strip function number to get card identity
@@ -1065,8 +1167,9 @@ class ModuleManager:
 
     def _default_module_custom_fields(self):
         """Return custom_fields dict for new module creation."""
+        # No "owner": defined on no instance, and NetBox 4.6 rejects the entire
+        # write for an unknown key. See server.py::_netbox_create_server.
         return {
-            "owner": self.default_owner,
             "record_completeness": "incomplete",
         }
 
@@ -1105,6 +1208,65 @@ class ModuleManager:
         )
         return category_bays
 
+    def _prune_filtered_orphans(self, device, category):
+        """Delete bays whose installed module matches a known filtered-
+        orphan pattern, then renumber remaining bays sequentially.
+
+        Independent of state-diff and per-category detection, so it
+        cleans up pre-filter zombies that current detection no longer
+        produces (the agent never enrolls them again → state cache and
+        local detection agree → `_sync_category` is skipped → the
+        inline pre-pass in `_prune_and_renumber_bays` never runs). The
+        C620 MROM bays on the turnip nodes are the canonical example:
+        written by an older PCI walk, invisible to current GPU
+        detection, never reconciled through the diff path.
+
+        Idempotent: returns immediately when no bays match.
+        """
+        prefix = CATEGORIES[category]["prefix"]
+        all_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
+        category_bays = sorted(
+            [b for b in all_bays if b.name.startswith(f"{prefix}-")],
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
+        )
+
+        deleted = False
+        for bay in category_bays:
+            mod = bay.installed_module
+            if not mod or not mod.module_type:
+                continue
+            model = (mod.module_type.model or "")
+            if any(pat in model for pat in self._FILTERED_ORPHAN_PATTERNS):
+                logger.info(
+                    "Pruning filtered-orphan module '%s' from bay '%s' on '%s' (INF-321)",
+                    model, bay.name, device.name,
+                )
+                _api_retry(mod.delete)
+                _api_retry(bay.delete)
+                deleted = True
+
+        if not deleted:
+            return
+
+        # Renumber remaining bays sequentially to close gaps left by
+        # the prune (NIC-0, NIC-1, NIC-3 → NIC-0, NIC-1, NIC-2 when
+        # NIC-2 was the orphan).
+        remaining_bays = list(_api_retry(nb.dcim.module_bays.filter, device_id=device.id))
+        remaining_category = sorted(
+            [b for b in remaining_bays if b.name.startswith(f"{prefix}-")],
+            key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
+        )
+        for i, bay in enumerate(remaining_category):
+            expected_name = f"{prefix}-{i}"
+            if bay.name != expected_name:
+                logger.info(
+                    "Renumbering bay '%s' → '%s' on '%s'",
+                    bay.name, expected_name, device.name,
+                )
+                bay.name = expected_name
+                bay.position = expected_name
+                _api_retry(bay.save)
+
     def _prune_and_renumber_bays(self, device, category, detected_count):
         """
         Remove excess empty bays and renumber remaining bays sequentially.
@@ -1123,7 +1285,32 @@ class ModuleManager:
             key=lambda b: (b.name.rsplit("-", 1)[0], int(b.name.rsplit("-", 1)[1]) if b.name.rsplit("-", 1)[-1].isdigit() else 0),
         )
 
-        if len(category_bays) <= detected_count:
+        # Pre-pass: drop bays whose installed module matches a known
+        # filtered-orphan pattern (INF-321 cleanup). These bays look
+        # populated to the standard prune below, which would defensively
+        # preserve them — but their modules will never be re-detected
+        # since the upstream filter ships in `_get_local_nics` /
+        # `_get_local_gpus`, so they're permanent zombies. Delete the
+        # module + bay together; the renumber pass below closes gaps.
+        orphan_bay_ids = set()
+        for bay in category_bays:
+            mod = bay.installed_module
+            if not mod or not mod.module_type:
+                continue
+            model = (mod.module_type.model or "")
+            if any(pat in model for pat in self._FILTERED_ORPHAN_PATTERNS):
+                logger.info(
+                    "Pruning filtered-orphan module '%s' from bay '%s' on '%s' (INF-321)",
+                    model, bay.name, device.name,
+                )
+                _api_retry(mod.delete)
+                _api_retry(bay.delete)
+                orphan_bay_ids.add(bay.id)
+
+        if orphan_bay_ids:
+            category_bays = [b for b in category_bays if b.id not in orphan_bay_ids]
+
+        if len(category_bays) <= detected_count and not orphan_bay_ids:
             return  # Nothing to prune
 
         # Separate populated and empty bays
@@ -1135,7 +1322,7 @@ class ModuleManager:
             else:
                 empty_bays.append(bay)
 
-        excess = len(category_bays) - detected_count
+        excess = max(len(category_bays) - detected_count, 0)
         to_delete = empty_bays[:excess]
 
         for bay in to_delete:
@@ -1145,7 +1332,7 @@ class ModuleManager:
             )
             _api_retry(bay.delete)
 
-        if not to_delete:
+        if not to_delete and not orphan_bay_ids:
             return  # Nothing was pruned, skip renumber
 
         # Renumber remaining bays sequentially
@@ -1220,6 +1407,23 @@ class ModuleManager:
 
     def _move_to_spare(self, module, category):
         """Move a module to the SPARE-INVENTORY device."""
+        # Filtered-orphan modules (SR-IOV VFs, PCIe topology stubs, chipset
+        # MROMs, etc.) must never park in SPARE — no future agent run walks
+        # SPARE bays, so anything landing here strands permanently. Delete
+        # instead. The populated-bay pre-pass in _prune_and_renumber_bays
+        # handles the source-device case; this guards the orphan path where
+        # _sync_category routes unmatched modules through _move_to_spare
+        # before the prune fires. INF-321.
+        mt = getattr(module, "module_type", None)
+        model = (getattr(mt, "model", "") or "") if mt else ""
+        if any(pat in model for pat in self._FILTERED_ORPHAN_PATTERNS):
+            logger.info(
+                "Deleting filtered-orphan module '%s' instead of parking in spare (INF-321)",
+                model,
+            )
+            _api_retry(module.delete)
+            return True
+
         spare = self._get_spare_device()
         if not spare:
             logger.error("Cannot move module to spare — spare device not found")
@@ -1479,6 +1683,16 @@ class ModuleManager:
             return False
 
         logger.info("Starting module sync for device '%s' (id=%d)", self.device.name, self.device.id)
+
+        # Unconditional filtered-orphan sweep — runs before the diff-gated
+        # category loop below, so pre-filter zombies get cleaned even when
+        # local detection has never enrolled them (the C620 MROM / state-
+        # diff-skip case). INF-321.
+        for cat in CATEGORIES:
+            try:
+                self._prune_filtered_orphans(self.device, cat)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Filtered-orphan prune failed for %s: %s", cat, e)
 
         # Skip PSU detection when dmidecode is unavailable
         skip_psu = deps is not None and not deps.get("dmidecode", True)

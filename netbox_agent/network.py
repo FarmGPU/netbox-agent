@@ -1,20 +1,126 @@
+import json
 import logging
 import os
 import re
+import subprocess
 from itertools import chain, islice
 from pathlib import Path
 
 import netifaces
 from netaddr import IPAddress
 from packaging import version
+from pynetbox.core.query import RequestError
 
 from netbox_agent.config import config
 from netbox_agent.config import netbox_instance as nb
 from netbox_agent.ethtool import Ethtool
 from netbox_agent.ipmi import IPMI
 from netbox_agent.lldp import LLDP
+from netbox_agent.misc import is_tool
 
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
+
+
+def _get_ovs_bonds():
+    """Return {bond_name: [slave_names]} for Open vSwitch-managed bonds.
+
+    OVS bonds are managed by ovs-vswitchd, not the Linux bonding driver, so
+    they don't expose `/sys/class/net/<bond>/bonding/`. Without this lookup,
+    the agent treats them as generic virtual interfaces — which on Proxmox
+    hosts (the main consumers of OVS in our fleet) silently corrupts the LAG
+    model: bond gets typed `virtual`, slaves never get `lag` pointers, and
+    NetBox can end up rejecting writes that were valid in the kernel-bond
+    case (INF-322).
+
+    Returns an empty dict when ovs-appctl isn't available or returns an
+    error — callers should fall back to kernel-bond detection only.
+    """
+    if not is_tool("ovs-appctl"):
+        return {}
+    try:
+        out = subprocess.check_output(
+            ["ovs-appctl", "bond/list"], encoding="utf-8", timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logging.debug("ovs-appctl bond/list failed: %s", e)
+        return {}
+
+    # Output format (tab-separated):
+    #   bond    type            recircID    members
+    #   bond0   balance-tcp     1           enp129s0f0np0, enp129s0f1np1
+    bonds = {}
+    for line in out.splitlines()[1:]:  # skip header
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        bond_name = parts[0].strip()
+        members = [m.strip() for m in parts[3].split(",") if m.strip()]
+        if bond_name and members:
+            bonds[bond_name] = members
+    return bonds
+
+
+def _default_route_iface():
+    """Return the iface name of the IPv4 default route, or None.
+
+    The default-route iface is the management interface by definition —
+    it's the path used to reach this host from outside. scan() uses this
+    so the ignore_interfaces regex can never filter out the iface that
+    owns primary_ip4. Without the guarantee, hosts that put their mgmt
+    IP on a Linux bridge (standalone Proxmox: vmbr0) or on any iface
+    that happens to match an operator's ignore pattern would have
+    primary_ip4 silently fail to resolve.
+    """
+    try:
+        out = subprocess.check_output(
+            ["ip", "-j", "route", "show", "default"],
+            encoding="utf-8", timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError) as e:
+        logging.debug("ip route show default failed: %s", e)
+        return None
+    try:
+        routes = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    if routes and isinstance(routes, list):
+        return routes[0].get("dev")
+    return None
+
+
+def _is_bridge(name):
+    """True iff /sys/class/net/<name> is a Linux bridge."""
+    return os.path.isdir(f"/sys/class/net/{name}/bridge")
+
+
+def _get_bridge_members(name):
+    """Return the list of port-member iface names for a Linux bridge.
+
+    Linux bridges expose port-members under /sys/class/net/<br>/brif/<port>.
+    Empty list for non-bridges or unreadable bridges. Members may include
+    physical NICs (eno1), bonds (bond0), or VM/container endpoints
+    (tap*, veth*) — callers filter by what survived ignore_interfaces.
+    """
+    brif = f"/sys/class/net/{name}/brif"
+    if not os.path.isdir(brif):
+        return []
+    try:
+        return sorted(os.listdir(brif))
+    except OSError:
+        return []
+
+
+def _is_sriov_vf_netdev(name):
+    """True iff the netdev is an SR-IOV virtual function.
+
+    sysfs exposes /sys/class/net/<name>/device/physfn as a symlink iff the
+    netdev belongs to a VF; the symlink points back to the parent PF.
+    Mirrors modules._is_sriov_vf (INF-321) for the netdev side — VFs share
+    the PF's wire, so tracking them as separate ifaces is double-counting,
+    and lldpd reporting the same neighbor for VF and PF makes the per-iface
+    cable creation path collide on duplicate terminations.
+    """
+    return os.path.islink(f"/sys/class/net/{name}/device/physfn")
 
 
 # Per-device cache: interface MAC (upper) → nic_module pynetbox object
@@ -224,7 +330,9 @@ def _sync_transceiver_module(device_id, interface, ethtool_data):
             module_bay=bay.id,
             module_type=module_type.id,
             serial=serial or "",
-            custom_fields={"owner": "FarmGPU"},
+            # No custom_fields: "owner" is defined on no instance and NetBox 4.6
+            # rejects the whole write for an unknown key. See
+            # server.py::_netbox_create_server.
         )
         logging.info(
             "Created transceiver: %s %s (SN:%s) on %s",
@@ -338,17 +446,66 @@ class Network(object):
     def scan(self):
         nics = []
         ignore_re = self._build_ignore_re()
+        # The default-route iface is the host's management interface by
+        # definition. Always enroll it, even if it matches the ignore
+        # regex (e.g., standalone Proxmox where mgmt lives on vmbr0).
+        # Without this carve-out, primary_ip4 can never resolve. Logged
+        # at INFO when the override fires so it's visible in journalctl.
+        mgmt_iface = _default_route_iface() or ""
+        # OVS bonds aren't visible through /sys/class/net/<bond>/bonding;
+        # query ovs-appctl once up-front so the per-iface loop below can
+        # treat OVS and kernel bonds uniformly. Empty dict when OVS isn't
+        # installed (the common case on bare-metal Linux).
+        ovs_bonds = _get_ovs_bonds()
         for interface in os.listdir("/sys/class/net/"):
             # ignore if it's not a link (ie: bonding_masters etc)
             if not os.path.islink("/sys/class/net/{}".format(interface)):
                 continue
 
-            if ignore_re and ignore_re.match(interface):
-                logging.debug("Ignore interface {interface}".format(interface=interface))
+            # Skip SR-IOV VFs — they share the PF's wire and shouldn't be
+            # tracked as separate ifaces. lldpd reports the same neighbor
+            # for the VF as for its parent PF, so without this skip the
+            # per-iface cable creation path tries to write a second cable
+            # to the same switch port and fails with HTTP 400 "Duplicate
+            # termination". Existing NetBox VF records get pruned by the
+            # "not present locally" deletion path in
+            # create_or_update_netbox_network_cards. Mirror of
+            # modules._is_sriov_vf (INF-321).
+            if _is_sriov_vf_netdev(interface):
+                logging.debug("Skipping SR-IOV VF: %s", interface)
                 continue
+
+            if ignore_re and ignore_re.match(interface):
+                if interface == mgmt_iface:
+                    logging.info(
+                        "Default-route iface %s matched ignore_interfaces; "
+                        "enrolling anyway so primary_ip4 can resolve.",
+                        interface,
+                    )
+                else:
+                    logging.debug(
+                        "Ignore interface {interface}".format(interface=interface)
+                    )
+                    continue
 
             ip_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET, [])
             ip6_addr = netifaces.ifaddresses(interface).get(netifaces.AF_INET6, [])
+
+            # Linux IPv4 alias labels (e.g., 'enp65s0f1:e') attach an IP to
+            # a parent iface under a separate label name. netifaces exposes
+            # each label as its own pseudo-interface, but the IP really
+            # belongs to the parent — `/sys/class/net` only lists the bare
+            # iface, so without this loop the labeled alias's IP was
+            # silently dropped (seen on VAST appliances where the mgmt IP
+            # is configured this way). Pick up both families for symmetry.
+            alias_prefix = "{}:".format(interface)
+            for alias in netifaces.interfaces():
+                if not alias.startswith(alias_prefix):
+                    continue
+                alias_ifaddrs = netifaces.ifaddresses(alias)
+                ip_addr.extend(alias_ifaddrs.get(netifaces.AF_INET, []))
+                ip6_addr.extend(alias_ifaddrs.get(netifaces.AF_INET6, []))
+
             if config.network.ignore_ips:
                 ip_addr = [ip for ip in ip_addr
                            if not re.match(config.network.ignore_ips, ip["addr"])]
@@ -409,6 +566,19 @@ class Network(object):
                 bonding_slaves = (
                     open("/sys/class/net/{}/bonding/slaves".format(interface)).read().split()
                 )
+            elif interface in ovs_bonds:
+                # Open vSwitch-managed bond (Proxmox/OVS hosts). See
+                # _get_ovs_bonds() and INF-322 for the why.
+                bonding = True
+                bonding_slaves = ovs_bonds[interface]
+
+            # Linux bridge detection mirrors the bonding lookup above.
+            # The bridge holds the IP; physical port-members carry the
+            # cable. _set_bridge_interfaces() points each member's
+            # iface.bridge at the bridge iface afterwards (parallel to
+            # _set_bonding_interfaces() for LAG slaves).
+            bridge = _is_bridge(interface)
+            bridge_members = _get_bridge_members(interface) if bridge else []
 
             virtual = Path(f"/sys/class/net/{interface}").resolve().parent == VIRTUAL_NET_FOLDER
 
@@ -427,6 +597,8 @@ class Network(object):
                 "mtu": mtu,
                 "bonding": bonding,
                 "bonding_slaves": bonding_slaves,
+                "bridge": bridge,
+                "bridge_members": bridge_members,
             }
             nics.append(nic)
         return nics
@@ -453,6 +625,38 @@ class Network(object):
             return False
         return True
 
+    def _set_bridge_interfaces(self):
+        """Point each bridge port-member's iface.bridge at the bridge iface.
+
+        Mirrors _set_bonding_interfaces() for LAG slaves. Once populated,
+        NetBox can navigate bridge → physical port-member → cable →
+        switch port — same shape as VLAN subiface → parent → cable.
+        Members that were filtered out (tap*, veth*, fwbr* under the
+        Proxmox ignore pattern) aren't in self.nics, so they're skipped
+        naturally without an HTTP roundtrip per VM.
+        """
+        bridge_nics = [x for x in self.nics if x.get("bridge")]
+        for nic in bridge_nics:
+            bridge_int = self.get_netbox_network_card(nic)
+            if not bridge_int:
+                continue
+            members = nic.get("bridge_members") or []
+            for member_int in (
+                self.get_netbox_network_card(member_nic)
+                for member_nic in self.nics
+                if member_nic["name"] in members
+            ):
+                if member_int is None:
+                    continue
+                current = getattr(member_int, "bridge", None)
+                if current is None or current.id != bridge_int.id:
+                    logging.debug(
+                        "Setting iface %s bridge=%s",
+                        member_int.name, bridge_int.name,
+                    )
+                    member_int.bridge = bridge_int
+                    member_int.save()
+
     def get_network_cards(self):
         return self.nics
 
@@ -472,6 +676,13 @@ class Network(object):
 
         if nic.get("bonding"):
             return self.dcim_choices["interface:type"]["Link Aggregation Group (LAG)"]
+
+        # Bridges must be checked before the generic `virtual` fallback;
+        # they live under /sys/devices/virtual/net/ so they'd otherwise
+        # be typed Virtual. Bridge is a dedicated NetBox interface type
+        # (since 3.0) — parallels typing bonds as LAG rather than Virtual.
+        if nic.get("bridge"):
+            return self.dcim_choices["interface:type"]["Bridge"]
 
         if nic.get("virtual"):
             return self.dcim_choices["interface:type"]["Virtual"]
@@ -594,6 +805,25 @@ class Network(object):
         parts = mac.split(":")
         return len(parts) == 6 and all(len(p) == 2 for p in parts)
 
+    def _all_macs(self, nic):
+        """All MACs to sync onto a NIC: primary first, then permanent if distinct.
+
+        For LACP bond slaves, `nic["mac"]` is the inherited bond MAC (shared
+        across slaves) and `ethtool -P` returns the slave's hardware-burned
+        MAC. Persisting both lets switch-side LACP partner-MAC observations
+        resolve to the specific physical slave (INF-318).
+        """
+        macs = []
+        primary = nic.get("mac")
+        if primary and self._is_valid_mac(primary):
+            macs.append(primary.upper())
+        perm = (nic.get("ethtool") or {}).get("mac_address")
+        if perm and self._is_valid_mac(perm):
+            perm_u = perm.upper()
+            if perm_u not in macs:
+                macs.append(perm_u)
+        return macs
+
     def update_interface_macs(self, nic, macs):
         """Sync MAC address objects on an interface. Returns current MAC objects."""
         nb_macs = list(self.nb_net.mac_addresses.filter(interface_id=nic.id))
@@ -672,8 +902,18 @@ class Network(object):
                     interface.untagged_vlan = nb_vlan.id
             interface.save()
 
-        # cable the interface
-        if config.network.lldp and isinstance(self, ServerNetwork):
+        # cable the interface — but never on a bond/LAG or bridge iface
+        # itself. NetBox rejects cables on type=lag; bridges are software
+        # constructs with no wire. Cables belong on the physical
+        # members, which iterate as separate nics in the outer loop
+        # (INF-320 for LAG slaves; same reasoning extends to bridge
+        # port-members).
+        if (
+            config.network.lldp
+            and isinstance(self, ServerNetwork)
+            and not nic.get("bonding")
+            and not nic.get("bridge")
+        ):
             switch_ip = self.lldp.get_switch_ip(interface.name)
             switch_interface = self.lldp.get_switch_port(interface.name)
 
@@ -819,7 +1059,80 @@ class Network(object):
             netbox_ip.save()
 
     def _enrich_ip(self, netbox_ip, interface):
-        """Set dns_name, tenant, and interface assignment on an existing IP."""
+        """Set dns_name, tenant, and interface assignment on an existing IP.
+
+        The host's `ip addr show` is the source of truth for which iface
+        owns an IP — if a NIC carries it on the wire, NetBox should
+        reflect that. NetBox 4.x rejects the iface reassignment patch
+        when the IP is currently designated as the parent object's
+        primary_ip4 / oob_ip; we clear that reference first so the
+        reassignment succeeds.
+
+        Two parent-object shapes the IP may currently belong to:
+
+        - dcim.interface  -> parent is a Device (has primary_ip4 + oob_ip)
+        - virtualization.vminterface -> parent is a VirtualMachine
+                                        (has primary_ip4 only)
+
+        Cross-namespace cases (VM iface holds an IP that a bare-metal
+        host now claims) are usually stale proxmox-sync records that
+        weren't pruned after VM decommission — same treatment, clear
+        the VM's primary_ip4 reference and let proxmox-sync's next
+        cycle reconcile the orphan.
+        """
+        old_obj_type = netbox_ip.assigned_object_type
+        old_obj_id = netbox_ip.assigned_object_id
+        new_obj_type = self.assigned_object_type
+        new_obj_id = interface.id
+
+        if old_obj_id and (old_obj_id != new_obj_id or old_obj_type != new_obj_type):
+            try:
+                current_owner = None
+                current_iface_name = None
+                if old_obj_type == "dcim.interface":
+                    ci = nb.dcim.interfaces.get(old_obj_id)
+                    if ci and ci.device:
+                        current_iface_name = ci.name
+                        current_owner = nb.dcim.devices.get(ci.device.id)
+                elif old_obj_type == "virtualization.vminterface":
+                    vi = nb.virtualization.interfaces.get(old_obj_id)
+                    if vi and vi.virtual_machine:
+                        current_iface_name = vi.name
+                        current_owner = nb.virtualization.virtual_machines.get(
+                            vi.virtual_machine.id
+                        )
+
+                if current_owner:
+                    updates = {}
+                    if (
+                        current_owner.primary_ip4
+                        and current_owner.primary_ip4.id == netbox_ip.id
+                    ):
+                        updates["primary_ip4"] = None
+                    # oob_ip exists on Device, not on VirtualMachine — guard
+                    if (
+                        getattr(current_owner, "oob_ip", None)
+                        and current_owner.oob_ip.id == netbox_ip.id
+                    ):
+                        updates["oob_ip"] = None
+                    if updates:
+                        logging.info(
+                            "Clearing %s on %s (%s/%s) before reassigning IP "
+                            "%s to %s",
+                            list(updates.keys()),
+                            current_owner.name,
+                            old_obj_type,
+                            current_iface_name,
+                            netbox_ip.address,
+                            interface.name,
+                        )
+                        current_owner.update(updates)
+            except Exception:
+                logging.debug(
+                    "Pre-reassign primary_ip4/oob_ip clear failed (proceeding anyway)",
+                    exc_info=True,
+                )
+
         netbox_ip.assigned_object_type = self.assigned_object_type
         netbox_ip.assigned_object_id = interface.id
         dns = self._ip_dns_name()
@@ -984,7 +1297,7 @@ class Network(object):
             if version.parse(nb.version) >= version.parse("4.2"):
                 # Sync MAC objects and set primary_mac_address (by ID)
                 if nic["mac"]:
-                    mac_objs = self.update_interface_macs(interface, [nic["mac"]])
+                    mac_objs = self.update_interface_macs(interface, self._all_macs(nic))
                     # Find the MAC object matching nic["mac"] and set as primary
                     primary_mac_id = None
                     for mac_obj in (mac_objs or []):
@@ -1061,8 +1374,15 @@ class Network(object):
                     nic_update += 1
                     interface.lag = None
 
-            # cable the interface
-            if config.network.lldp and isinstance(self, ServerNetwork):
+            # cable the interface — never on a bond/LAG or bridge iface
+            # itself (NetBox 4.x rejects cables on type=lag, INF-320;
+            # bridges are software constructs with no wire).
+            if (
+                config.network.lldp
+                and isinstance(self, ServerNetwork)
+                and not nic.get("bonding")
+                and not nic.get("bridge")
+            ):
                 switch_ip = self.lldp.get_switch_ip(interface.name)
                 switch_interface = self.lldp.get_switch_port(interface.name)
                 if switch_ip and switch_interface:
@@ -1079,6 +1399,7 @@ class Network(object):
                 interface.save()
 
         self._set_bonding_interfaces()
+        self._set_bridge_interfaces()
         logging.debug("Finished updating NIC!")
 
 
@@ -1119,6 +1440,20 @@ class ServerNetwork(Network):
             logging.error("Switch IP {} cannot be found in Netbox".format(switch_ip))
             return nb_server_interface
 
+        # The IP record may exist in IPAM without being assigned to any
+        # interface (bare IP) — e.g., partially-enrolled DPU mgmt addresses,
+        # or LLDP neighbors that happen to be hosts/DPUs whose mgmt-ip is
+        # tracked but not as a switch interface. In that case
+        # `assigned_object` is None and `.device` raises AttributeError.
+        # Treat it the same as "not associated to a Netbox Switch Device".
+        if nb_mgmt_ip.assigned_object is None:
+            logging.error(
+                "Switch IP {} is found but not assigned to any interface in Netbox".format(
+                    switch_ip
+                )
+            )
+            return nb_server_interface
+
         try:
             nb_switch = nb_mgmt_ip.assigned_object.device
             logging.info(
@@ -1126,7 +1461,7 @@ class ServerNetwork(Network):
                     switch_ip, nb_switch.id
                 )
             )
-        except KeyError:
+        except (KeyError, AttributeError):
             logging.error(
                 "Switch IP {} is found but not associated to a Netbox Switch Device".format(
                     switch_ip
@@ -1149,14 +1484,77 @@ class ServerNetwork(Network):
                 switch_ip,
             )
         )
-        cable = nb.dcim.cables.create(
-            a_terminations=[
-                {"object_type": "dcim.interface", "object_id": nb_server_interface.id},
-            ],
-            b_terminations=[
-                {"object_type": "dcim.interface", "object_id": nb_switch_interface.id},
-            ],
-        )
+        # Defensive: the switch interface may already have a cable that the
+        # server-side check at create_or_update_cable() didn't see. Two cases:
+        #   (a) Orphan cable (one side missing terminations) — delete it and
+        #       proceed to create a fresh, fully-terminated cable.
+        #   (b) Valid cable to a different host — log error and return without
+        #       creating. NetBox would 400 on a duplicate termination otherwise,
+        #       crashing the whole agent run.
+        # Refetch via nb.dcim.cables.get() to be sure terminations are loaded.
+        existing_ref = nb_switch_interface.cable
+        if existing_ref is not None:
+            existing = nb.dcim.cables.get(existing_ref.id)
+            a_term = list(existing.a_terminations or [])
+            b_term = list(existing.b_terminations or [])
+            if not a_term or not b_term:
+                logging.warning(
+                    "Switch interface {sw_iface} (id={sw_iface_id}) on {sw_ip} "
+                    "has orphaned cable {cable_id} "
+                    "(a_terminations={a}, b_terminations={b}) — deleting before recable".format(
+                        sw_iface=switch_interface,
+                        sw_iface_id=nb_switch_interface.id,
+                        sw_ip=switch_ip,
+                        cable_id=existing.id,
+                        a=len(a_term),
+                        b=len(b_term),
+                    )
+                )
+                existing.delete()
+            else:
+                logging.error(
+                    "Switch interface {sw_iface} on {sw_ip} is already cabled "
+                    "(cable {cable_id}) to another fully-terminated endpoint — "
+                    "skipping recable from {host_iface} to avoid NetBox 400 "
+                    "duplicate-termination crash. Resolve the conflict manually.".format(
+                        sw_iface=switch_interface,
+                        sw_ip=switch_ip,
+                        cable_id=existing.id,
+                        host_iface=nb_server_interface.name,
+                    )
+                )
+                return nb_server_interface
+        try:
+            cable = nb.dcim.cables.create(
+                a_terminations=[
+                    {"object_type": "dcim.interface", "object_id": nb_server_interface.id},
+                ],
+                b_terminations=[
+                    {"object_type": "dcim.interface", "object_id": nb_switch_interface.id},
+                ],
+            )
+        except RequestError as exc:
+            # Cabling is enrichment; inventory is the product. A cable NetBox
+            # refuses must never abort the run — the exception used to unwind
+            # all the way out of netbox_create_or_update, discarding every
+            # module, interface and IP already gathered, and leaving the device
+            # with no heartbeat at all.
+            #
+            # Most common cause: NetBox rejects a termination whose interface
+            # type is in NONCONNECTABLE_IFACE_TYPES — virtual + wireless
+            # (dcim/models/cables.py:574, dcim/constants.py:74) — with
+            # 400 "Cables cannot be terminated to Virtual interfaces". A VLAN
+            # subinterface such as `1s0f0.234` is the usual trigger.
+            logging.error(
+                "Failed to cable {interface} to {switch_interface} on {switch_ip}: "
+                "{err} — continuing sync without this cable".format(
+                    interface=nb_server_interface.name,
+                    switch_interface=switch_interface,
+                    switch_ip=switch_ip,
+                    err=exc,
+                )
+            )
+            return nb_server_interface
         nb_server_interface.cable = cable
         logging.info(
             "Connected interface {interface} with {switch_interface} of {switch_ip}".format(
@@ -1175,21 +1573,28 @@ class ServerNetwork(Network):
                 switch_ip, switch_interface, nb_server_interface
             )
         else:
+            # Verify the existing cable still points to the LLDP-reported
+            # switch + port. We already have switch_ip from LLDP — look it
+            # up in IPAM directly and confirm it's assigned to an iface on
+            # the cable's far-side switch. Avoids the previous code's
+            # `nb.dcim.interfaces.get(mgmt_only=True)` which raised ValueError
+            # on switches with more than one mgmt_only iface (e.g., Arista's
+            # Management + Management1).
             nb_sw_int = nb_server_interface.cable.b_terminations[0]
             nb_sw = nb_sw_int.device
-            nb_mgmt_int = nb.dcim.interfaces.get(device_id=nb_sw.id, mgmt_only=True)
-            nb_mgmt_ip = nb.ipam.ip_addresses.get(interface_id=nb_mgmt_int.id)
-            if nb_mgmt_ip is None:
-                logging.error(
-                    "Switch {switch_ip} does not have IP on its management interface".format(
-                        switch_ip=switch_ip,
-                    )
-                )
-                return update, nb_server_interface
 
-            # Netbox IP is always IP/Netmask
-            nb_mgmt_ip = nb_mgmt_ip.address.split("/")[0]
-            if nb_mgmt_ip != switch_ip or nb_sw_int.name != switch_interface:
+            # Look up the LLDP-reported IP in IPAM. CIDR notation in NetBox.
+            lldp_ip_objs = list(nb.ipam.ip_addresses.filter(address=switch_ip))
+            cabled_to_correct_switch = False
+            for ip_obj in lldp_ip_objs:
+                if ip_obj.assigned_object_type != "dcim.interface":
+                    continue
+                assigned_iface = nb.dcim.interfaces.get(ip_obj.assigned_object_id)
+                if assigned_iface and assigned_iface.device.id == nb_sw.id:
+                    cabled_to_correct_switch = True
+                    break
+
+            if not cabled_to_correct_switch or nb_sw_int.name != switch_interface:
                 logging.info("Netbox cable is not connected to correct ports, fixing..")
                 logging.info(
                     "Deleting cable {cable_id} from {interface} to {switch_interface} of "
@@ -1197,7 +1602,7 @@ class ServerNetwork(Network):
                         cable_id=nb_server_interface.cable.id,
                         interface=nb_server_interface.name,
                         switch_interface=nb_sw_int.name,
-                        switch_ip=nb_mgmt_ip,
+                        switch_ip=switch_ip,
                     )
                 )
                 cable = nb.dcim.cables.get(nb_server_interface.cable.id)

@@ -101,6 +101,7 @@ class LSHW:
                 "product": obj.get("product", "Unknown NIC"),
                 "vendor": obj.get("vendor", "Unknown"),
                 "description": obj.get("description", ""),
+                "businfo": obj.get("businfo", ""),
             }
         )
 
@@ -251,6 +252,28 @@ class LSHW:
             }
             self.gpus.append(infos)
 
+    def _get_nvme_info(self, device_path):
+        """Get NVMe device information using nvme list command."""
+        if not is_tool("nvme"):
+            return {}
+        try:
+            nvme_output = subprocess.check_output(
+                ["nvme", "list", "-o", "json"], encoding="utf8"
+            )
+            nvme_data = json.loads(nvme_output)
+            for device in nvme_data.get("Devices", []):
+                if device.get("DevicePath") == device_path:
+                    return {
+                        "product": device.get("ModelNumber"),
+                        "serial": device.get("SerialNumber"),
+                        "version": device.get("Firmware"),
+                        "size": device.get("PhysicalSize") or device.get("UsedBytes"),
+                        "vendor": "Unknown",
+                    }
+        except Exception:
+            pass
+        return {}
+
     # Descriptions that indicate chipset infrastructure, NOT real accelerators.
     # These are IOMMU, host bridges, system peripherals, etc. that lshw
     # classifies as "generic" but are not compute accelerators.
@@ -264,6 +287,17 @@ class LSHW:
         "scsi enclosure",           # Dell storage enclosure managers (Fryer U.2 etc.)
     }
 
+    # Products that look like chipset infrastructure to lshw (class=generic,
+    # description="DMA controller" or "system peripheral") but are actually
+    # real hardware we want enrolled. Matched as case-insensitive substrings
+    # against the lshw `product` field. Vendor must also match the listed
+    # OUI to avoid letting unrelated DMA controllers slip through.
+    # Empty since SW-244: BF3 SoC mgmt is no longer enrolled as a Module
+    # (DPUs are first-class Devices per SW-240/SW-241). any() over an empty
+    # tuple returns False, so is_known_exception is always False and the
+    # standard infra filter fires normally.
+    _INFRA_DESCRIPTION_EXCEPTIONS = ()
+
     def find_accelerators(self, obj):
         """Route PCI devices under coprocessor/generic/processing classes.
 
@@ -271,20 +305,38 @@ class LSHW:
         self.gpus — they are general-purpose GPUs regardless of PCI class.
 
         Everything else goes to self.accelerators (Pliops, FPGAs, QAT, etc.).
-        Chipset infrastructure (IOMMU, system peripherals) is filtered out.
+        Chipset infrastructure (IOMMU, system peripherals) is filtered out,
+        except for explicit `_INFRA_DESCRIPTION_EXCEPTIONS` matches.
         """
         if "product" not in obj:
             return
         description = obj.get("description", "").lower()
-        # Skip chipset infrastructure
-        if any(infra in description for infra in self._INFRA_DESCRIPTIONS):
-            return
-
+        product_lower = obj.get("product", "").lower()
         vendor = obj.get("vendor", "Unknown")
         vendor_lower = vendor.lower()
 
-        # Known GPU vendors under non-display PCI classes → route to GPUs
-        if any(gv in vendor_lower for gv in self._GPU_VENDORS):
+        # An explicit description-exception (e.g. BF3 SoC mgmt presents as
+        # "DMA controller") overrides BOTH the infrastructure filter AND
+        # the GPU-vendor routing. Post-Mellanox-acquisition firmware can
+        # report vendor="NVIDIA Corporation" on BF3 SoC mgmt, which would
+        # otherwise get misrouted to self.gpus.
+        is_known_exception = any(
+            v in vendor_lower and p in product_lower
+            for v, p in self._INFRA_DESCRIPTION_EXCEPTIONS
+        )
+
+        # Skip chipset infrastructure, unless this is a known exception.
+        if (
+            not is_known_exception
+            and any(infra in description for infra in self._INFRA_DESCRIPTIONS)
+        ):
+            return
+
+        # Known GPU vendors under non-display PCI classes → route to GPUs,
+        # unless an explicit exception keeps them in accelerators.
+        if not is_known_exception and any(
+            gv in vendor_lower for gv in self._GPU_VENDORS
+        ):
             self.find_gpus(obj)
             return
 

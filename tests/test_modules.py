@@ -395,6 +395,37 @@ class TestModuleManagerDetection:
         nics = mm._get_local_nics()
         assert len(nics) == 2
 
+    def test_get_local_nics_skips_bluefield(self, mm, mock_lshw):
+        """BlueField NICs must be excluded — DPUs are Devices not Modules (SW-244)."""
+        mock_lshw.interfaces = [
+            # BF3 NIC — must be skipped
+            {
+                "product": "MT43244 BlueField-3 integrated ConnectX-7 network controller [crypto enabled]",
+                "vendor": "Mellanox Technologies",
+                "serial": "aa:bb:cc:dd:ee:10",
+                "businfo": "pci@0000:82:00.0",
+                "name": "enp130s0f0",
+                "description": "Ethernet",
+            },
+            # ConnectX-6 control — must be included
+            {
+                "product": "MT28908 Family [ConnectX-6]",
+                "vendor": "Mellanox Technologies",
+                "serial": "aa:bb:cc:dd:ee:20",
+                "businfo": "pci@0000:41:00.0",
+                "name": "enp65s0f0",
+                "description": "Ethernet",
+            },
+        ]
+        nics = mm._get_local_nics()
+        products = [n["product"] for n in nics]
+        assert not any("bluefield" in p.lower() for p in products), (
+            "BlueField NIC must not appear in _get_local_nics() result"
+        )
+        assert any("ConnectX-6" in p for p in products), (
+            "ConnectX-6 control NIC must appear in _get_local_nics() result"
+        )
+
     def test_get_local_psus(self, mm):
         """PSU detection uses numeric DMI type 39 to avoid leading-space lookup bug."""
         mock_dmi_data = {
@@ -443,6 +474,46 @@ class TestModuleManagerDetection:
 # ---------------------------------------------------------------------------
 # Tests: Module Type Resolution
 # ---------------------------------------------------------------------------
+
+class TestBlueField3Suppression:
+    """SW-244: BF3-related Module records must not be created."""
+
+    def test_pci_stub_allowlist_is_empty(self, mm):
+        """_PCI_STUB_ALLOWLIST must be empty — BF3 SoC mgmt c2d5 no longer allowlisted (SW-244)."""
+        from netbox_agent.modules import ModuleManager
+        assert ModuleManager._PCI_STUB_ALLOWLIST == frozenset(), (
+            "15b3:c2d5 must not be in the allowlist after SW-244"
+        )
+
+    def test_pcie_topology_stub_returns_true_for_bf3_soc(self, mm):
+        """_is_pcie_topology_stub() must return True for 15b3:c2d5 after allowlist removal."""
+        sysfs_data = {
+            "/sys/bus/pci/devices/0000:06:00.0/class": "0x080700",
+            "/sys/bus/pci/devices/0000:06:00.0/vendor": "0x15b3",
+            "/sys/bus/pci/devices/0000:06:00.0/device": "0xc2d5",
+        }
+
+        def fake_open(path, *args, **kwargs):
+            from io import StringIO
+            import builtins
+            if path in sysfs_data:
+                return StringIO(sysfs_data[path])
+            return builtins.open.__wrapped__(path, *args, **kwargs) if hasattr(builtins.open, "__wrapped__") else builtins.open(path, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=fake_open):
+            result = mm._is_pcie_topology_stub("0000:06:00.0")
+        assert result is True, (
+            "BF3 SoC mgmt (15b3:c2d5, class 0x08) must now be a stub — not allowlisted"
+        )
+
+    def test_filtered_orphan_patterns_contains_bf3_entries(self):
+        """_FILTERED_ORPHAN_PATTERNS must include all three BF3 cleanup patterns (SW-244)."""
+        from netbox_agent.modules import ModuleManager
+        patterns = ModuleManager._FILTERED_ORPHAN_PATTERNS
+        assert "BlueField-3 integrated ConnectX-7" in patterns, "mt-92 NIC pattern missing"
+        assert "BlueField-3 SoC Management" in patterns, "mt-309 SoC mgmt pattern missing"
+        assert "BlueField-3 DPU" in patterns, "mt-170 DPU pattern missing"
+
 
 class TestModuleManagerTypeResolution:
 
