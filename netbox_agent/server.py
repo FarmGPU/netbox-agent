@@ -1141,29 +1141,33 @@ class ServerBase:
         server = nb.dcim.devices.get(server.id)
         primary_update = False
 
-        # Clear primary_ip4 if it points to an IP no longer assigned
-        if server.primary_ip4 and server.primary_ip4.id not in assigned_ip_ids:
-            logging.info(
-                "Clearing stale primary_ip4 %s (no longer assigned to device)",
-                server.primary_ip4,
-            )
-            server.primary_ip4 = None
+        # Converge primary_ip4 on the management address instead of only
+        # filling it when empty. A device enrolled BMC-first has primary_ip4
+        # set to its OOB address by bmc-scan, and that address IS assigned to
+        # the IPMI interface — so the staleness check never fired and the old
+        # "fill only when empty" branch never ran. The BMC address stayed
+        # primary forever, and nb_inventory derives ansible_host from
+        # primary_ip, so Ansible targeted the BMC instead of the OS.
+        #
+        # Hosts that looked correct had been fixed by a side effect: moving
+        # the BMC IP between masks cleared primary_ip4 as a precondition of
+        # unassigning it, which happened to re-open the fill path. Once every
+        # BMC IP settles into its final shape that stops happening, so the
+        # miss becomes permanent. Observed on rocoto05-108l / rocoto16-108y.
+        new_primary, primary_changed = self._resolve_primary_ip4(
+            server.primary_ip4,
+            assigned_ip_ids,
+            myips,
+            self._get_default_gateway_interface(),
+        )
+        if primary_changed:
+            if new_primary is None:
+                logging.info(
+                    "Clearing stale primary_ip4 %s (no longer assigned to device)",
+                    server.primary_ip4,
+                )
+            server.primary_ip4 = new_primary
             primary_update = True
-
-        # Set primary_ip4 to the management IP (default gateway interface)
-        if not server.primary_ip4:
-            mgmt_iface = self._get_default_gateway_interface()
-            if mgmt_iface:
-                for ip in myips:
-                    if (
-                        ip.assigned_object
-                        and ip.assigned_object.display == mgmt_iface
-                        and ip.family
-                        and ip.family.value == 4
-                    ):
-                        server.primary_ip4 = ip.id
-                        primary_update = True
-                        break
 
         if primary_update:
             try:
@@ -1251,6 +1255,46 @@ class ServerBase:
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _resolve_primary_ip4(current, assigned_ip_ids, myips, mgmt_iface):
+        """
+        Decide what primary_ip4 should point at.
+
+        Returns (new_ip_id_or_None, changed).
+
+        Rules, applied in order:
+          * a reference to an address no longer attached to this device is
+            dropped;
+          * when the host's default-gateway interface carries an IPv4
+            address, primary_ip4 converges on it — this is what corrects a
+            device whose primary_ip4 is a validly-assigned OOB address;
+          * when it does not (DPUs, switches, BMC-only skeletons that the
+            agent has not enriched), whatever is already set stands, so an
+            OOB-as-primary record is deliberately left alone.
+        """
+        current_id = current.id if current else None
+        new_id = current_id
+
+        if current_id is not None and current_id not in assigned_ip_ids:
+            new_id = None
+
+        desired = None
+        if mgmt_iface:
+            for ip in myips:
+                if (
+                    ip.assigned_object
+                    and ip.assigned_object.display == mgmt_iface
+                    and ip.family
+                    and ip.family.value == 4
+                ):
+                    desired = ip.id
+                    break
+
+        if desired is not None:
+            new_id = desired
+
+        return new_id, new_id != current_id
 
     def _get_default_gateway_interface(self):
         """
