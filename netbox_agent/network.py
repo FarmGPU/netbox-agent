@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -19,6 +20,104 @@ from netbox_agent.lldp import LLDP
 from netbox_agent.misc import is_tool
 
 VIRTUAL_NET_FOLDER = Path("/sys/devices/virtual/net")
+
+# Custom field carrying dns_name provenance. See _may_write_dns_name.
+DNS_NAME_OWNER_CF = "dns_name_managed_by"
+DNS_NAME_OWNER = "netbox-agent"
+
+# Per-run caches. The agent is a short-lived process, so "once per run" is the
+# right lifetime for both — a fleet of hosts each doing one prefix fetch is far
+# cheaper than one `contains=` query per address.
+_prefix_cache = None
+_dns_cf_present = None
+
+
+def _load_vrf_prefixes():
+    """Every VRF-owned, non-container prefix as (network, vrf_id, vrf_name).
+
+    Fetched once per run. Container prefixes are skipped because they exist to
+    group other prefixes, not to own addresses — matching one would attribute an
+    IP to a VRF whose child prefix may say otherwise.
+    """
+    global _prefix_cache
+    if _prefix_cache is not None:
+        return _prefix_cache
+
+    cache = []
+    try:
+        for prefix in nb.ipam.prefixes.all():
+            status = getattr(prefix.status, "value", None) or str(prefix.status or "")
+            if status == "container" or not prefix.vrf:
+                continue
+            try:
+                cache.append(
+                    (ipaddress.ip_network(str(prefix.prefix)), prefix.vrf.id, prefix.vrf.name)
+                )
+            except ValueError:
+                logging.debug("Skipping unparseable prefix %r", getattr(prefix, "prefix", None))
+    except Exception:
+        # A failed fetch must not abort the sync: an unknown VRF scope degrades
+        # to the pre-DEV-91 behaviour (everything lands in the global table),
+        # which is wrong but recoverable on the next run.
+        logging.warning("Could not load prefixes for VRF resolution", exc_info=True)
+        cache = []
+
+    _prefix_cache = cache
+    return _prefix_cache
+
+
+def vrf_for_address(address):
+    """VRF id owning *address*, or None when it belongs in the global table.
+
+    Longest-match wins, mirroring how a router would resolve it. A tie between
+    two VRFs at the same prefix length is unresolvable here, so it returns None
+    and leaves the address global rather than guessing — an operator can see a
+    global IP and fix it, but a silently wrong VRF looks correct.
+    """
+    try:
+        addr = ipaddress.ip_address(str(address).split("/")[0])
+    except ValueError:
+        return None
+
+    candidates = [(net, vrf_id, name) for net, vrf_id, name in _load_vrf_prefixes() if addr in net]
+    if not candidates:
+        return None
+
+    longest = max(net.prefixlen for net, _, _ in candidates)
+    winners = [c for c in candidates if c[0].prefixlen == longest]
+    if len(winners) > 1:
+        logging.warning(
+            "Ambiguous VRF for %s: %d prefixes tie at /%d (%s); leaving it in the global table",
+            address,
+            len(winners),
+            longest,
+            ", ".join(sorted(name for _, _, name in winners)),
+        )
+        return None
+
+    return winners[0][1]
+
+
+def _dns_provenance_available():
+    """Whether NetBox has the dns_name provenance custom field.
+
+    Checked once per run. When absent, the agent still protects hand-set names
+    via the hostname comparison in _may_write_dns_name — it simply cannot track
+    a legitimate hostname change on a name it owns.
+    """
+    global _dns_cf_present
+    if _dns_cf_present is None:
+        try:
+            _dns_cf_present = bool(list(nb.extras.custom_fields.filter(name=DNS_NAME_OWNER_CF)))
+        except Exception:
+            _dns_cf_present = False
+        if not _dns_cf_present:
+            logging.warning(
+                "Custom field '%s' is not defined in NetBox; dns_name ownership will "
+                "fall back to comparing the stored name against the current hostname",
+                DNS_NAME_OWNER_CF,
+            )
+    return _dns_cf_present
 
 
 def _get_ovs_bonds():
@@ -943,6 +1042,10 @@ class Network(object):
         * If IP exists and isn't assigned, take it
         * If IP exists and interface is wrong, change interface
         """
+        # VRF the address belongs to, from the containing prefix (DEV-91).
+        # Resolved before the lookup because it scopes which record we want.
+        vrf_id = vrf_for_address(ip)
+
         netbox_ips = nb.ipam.ip_addresses.filter(
             address=ip,
         )
@@ -952,6 +1055,8 @@ class Network(object):
             bare_ip = ip.split("/")[0]
             netbox_ips = nb.ipam.ip_addresses.filter(address=bare_ip)
 
+        netbox_ips = list(netbox_ips)
+
         if not netbox_ips:
             logging.info("Create new IP {ip} on {interface}".format(ip=ip, interface=interface))
             query_params = {
@@ -959,8 +1064,14 @@ class Network(object):
                 "status": "active",
                 "assigned_object_type": self.assigned_object_type,
                 "assigned_object_id": interface.id,
-                "dns_name": self._ip_dns_name(),
             }
+            dns = self._ip_dns_name()
+            if dns:
+                query_params["dns_name"] = dns
+                if _dns_provenance_available():
+                    query_params["custom_fields"] = {DNS_NAME_OWNER_CF: DNS_NAME_OWNER}
+            if vrf_id:
+                query_params["vrf"] = vrf_id
             if self.tenant:
                 query_params["tenant"] = self.tenant.id
             try:
@@ -978,7 +1089,7 @@ class Network(object):
                 raise
             return netbox_ip
 
-        netbox_ip = list(netbox_ips)[0]
+        netbox_ip = self._select_ip_for_vrf(netbox_ips, vrf_id, ip)
         # If IP exists in anycast
         if netbox_ip.role and netbox_ip.role.label == "Anycast":
             logging.debug("IP {} is Anycast..".format(ip))
@@ -1002,8 +1113,14 @@ class Network(object):
                     "tenant": self.tenant.id if self.tenant else None,
                     "assigned_object_type": self.assigned_object_type,
                     "assigned_object_id": interface.id,
-                    "dns_name": self._ip_dns_name(),
                 }
+                dns = self._ip_dns_name()
+                if dns:
+                    query_params["dns_name"] = dns
+                    if _dns_provenance_available():
+                        query_params["custom_fields"] = {DNS_NAME_OWNER_CF: DNS_NAME_OWNER}
+                if vrf_id:
+                    query_params["vrf"] = vrf_id
                 netbox_ip = nb.ipam.ip_addresses.create(**query_params)
             return netbox_ip
         else:
@@ -1040,6 +1157,96 @@ class Network(object):
         except Exception:
             return ""
 
+    def _may_write_dns_name(self, netbox_ip):
+        """Whether the agent owns dns_name on this record (DEV-94).
+
+        The agent writes dns_name when it is unset, or when the agent wrote it
+        last. A name set by anyone else is left alone: at sites where tenants
+        can rename their own machines, the OS hostname is not an identity we
+        control, and propagating it destroys the operator-set name on every
+        run.
+
+        Ownership lives in the `dns_name_managed_by` custom field, stamped
+        whenever the agent writes the name. Records predating the field carry
+        no value, so a stored name identical to what we would write now is
+        treated as ours — that adopts existing agent-written names with no
+        backfill, while leaving hand-set names protected.
+        """
+        if netbox_ip is None:
+            return True
+
+        current = getattr(netbox_ip, "dns_name", "") or ""
+        if not current:
+            return True
+
+        owner = (getattr(netbox_ip, "custom_fields", None) or {}).get(DNS_NAME_OWNER_CF) or ""
+        if owner:
+            return owner == DNS_NAME_OWNER
+
+        return current == self._ip_dns_name()
+
+    def _stamp_dns_name(self, netbox_ip, dns):
+        """Set dns_name and record that the agent owns it. Returns True if changed."""
+        if getattr(netbox_ip, "dns_name", None) == dns:
+            return False
+
+        logging.info(
+            "Setting dns_name=%s on IP %s (was %r)",
+            dns, netbox_ip.address, getattr(netbox_ip, "dns_name", None),
+        )
+        netbox_ip.dns_name = dns
+        if _dns_provenance_available():
+            custom_fields = dict(getattr(netbox_ip, "custom_fields", None) or {})
+            custom_fields[DNS_NAME_OWNER_CF] = DNS_NAME_OWNER
+            netbox_ip.custom_fields = custom_fields
+        return True
+
+    def _select_ip_for_vrf(self, netbox_ips, vrf_id, ip):
+        """Choose which existing record to use, honouring VRF (DEV-91).
+
+        Never creates a duplicate. When the only record sits in the global
+        table but the address belongs to a VRF-owned prefix, that record is
+        MOVED into the VRF rather than a second one being created — the agent
+        wrote those records, and a move is reversible where a duplicate is not.
+
+        When records exist in both places the VRF one wins and the global one
+        is left untouched: deciding which of two populated records is correct
+        needs a human, not a heuristic.
+        """
+        if vrf_id is None or not netbox_ips:
+            return netbox_ips[0] if netbox_ips else None
+
+        in_vrf = [x for x in netbox_ips if x.vrf and x.vrf.id == vrf_id]
+        in_global = [x for x in netbox_ips if not x.vrf]
+
+        if in_vrf:
+            if in_global:
+                logging.warning(
+                    "IP %s exists both in VRF id=%s (record %s) and in the global table "
+                    "(record %s); using the VRF record and leaving the global duplicate "
+                    "for manual merge",
+                    ip, vrf_id, in_vrf[0].id, in_global[0].id,
+                )
+            return in_vrf[0]
+
+        if in_global:
+            record = in_global[0]
+            logging.info(
+                "Moving IP %s (record %s) from the global table into VRF id=%s",
+                ip, record.id, vrf_id,
+            )
+            record.vrf = vrf_id
+            try:
+                record.save()
+            except Exception:
+                logging.warning(
+                    "Could not move IP %s into VRF id=%s; leaving it global",
+                    ip, vrf_id, exc_info=True,
+                )
+            return record
+
+        return netbox_ips[0]
+
     def _enrich_existing_ip(self, netbox_ip):
         """Update dns_name and tenant on an IP that is already correctly assigned.
 
@@ -1047,15 +1254,14 @@ class Network(object):
         """
         dirty = False
         dns = self._ip_dns_name()
-        if dns and getattr(netbox_ip, "dns_name", None) != dns:
-            netbox_ip.dns_name = dns
-            dirty = True
+        if dns and self._may_write_dns_name(netbox_ip):
+            dirty = self._stamp_dns_name(netbox_ip, dns) or dirty
         if self.tenant and getattr(netbox_ip, "tenant", None) != self.tenant:
             netbox_ip.tenant = self.tenant.id
             dirty = True
         if dirty:
             logging.info("Enriching IP %s: dns_name=%s tenant=%s",
-                         netbox_ip.address, dns, self.tenant)
+                         netbox_ip.address, netbox_ip.dns_name, self.tenant)
             netbox_ip.save()
 
     def _enrich_ip(self, netbox_ip, interface):
@@ -1136,8 +1342,8 @@ class Network(object):
         netbox_ip.assigned_object_type = self.assigned_object_type
         netbox_ip.assigned_object_id = interface.id
         dns = self._ip_dns_name()
-        if dns and getattr(netbox_ip, "dns_name", None) != dns:
-            netbox_ip.dns_name = dns
+        if dns and self._may_write_dns_name(netbox_ip):
+            self._stamp_dns_name(netbox_ip, dns)
         if self.tenant and getattr(netbox_ip, "tenant", None) != self.tenant:
             netbox_ip.tenant = self.tenant.id
         netbox_ip.save()
