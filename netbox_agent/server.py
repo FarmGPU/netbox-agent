@@ -465,60 +465,29 @@ class ServerBase:
         # Default: CPU Server
         return "CPU Server"
 
-    # --- Tenant auto-detection from running services ---
-
-    # Services whose presence indicates RunPod tenant
-    _RUNPOD_SERVICES = ("runpod", "safe_runpod", "runpod-worker")
-    # MooseFS services indicate dedicated storage for RunPod
-    _MOOSEFS_SERVICES = (
-        "moosefs-chunkserver", "moosefs-master", "moosefs-metalogger",
-        "mfschunkserver", "mfsmaster",
-    )
-
-    def _detect_tenant(self) -> str:
-        """Detect tenant from running systemd services.
-
-        Returns tenant slug:
-          - 'runpod' if any RunPod or MooseFS service is active
-          - 'farmgpu' otherwise
-        """
-        for svc in self._RUNPOD_SERVICES + self._MOOSEFS_SERVICES:
-            try:
-                result = subprocess.run(
-                    ["systemctl", "is-active", svc],
-                    capture_output=True, encoding="utf-8", timeout=5,
-                )
-                if result.stdout.strip() == "active":
-                    logging.debug("Tenant detection: service '%s' is active → runpod", svc)
-                    return "runpod"
-            except Exception:
-                pass
-        return "farmgpu"
-
-    def _sync_tenant(self, server):
-        """Sync tenant based on detected running services.
-
-        Updates tenant on every sync cycle so repurposed machines
-        auto-flip between RunPod and FarmGPU.
-        """
-        tenant_slug = self._detect_tenant()
-        nb_tenant = nb.tenancy.tenants.get(slug=tenant_slug)
-        if not nb_tenant:
-            logging.warning(
-                "Tenant '%s' not found in NetBox — skipping tenant sync for '%s'",
-                tenant_slug, server.name,
-            )
-            return
-
-        current_tenant_id = server.tenant.id if server.tenant else None
-        if current_tenant_id != nb_tenant.id:
-            old_name = server.tenant.name if server.tenant else "(none)"
-            server.tenant = nb_tenant.id
-            server.save()
-            logging.info(
-                "Tenant for '%s': %s → %s",
-                server.name, old_name, nb_tenant.name,
-            )
+    # --- Tenancy is NOT agent-owned ---
+    #
+    # The agent used to infer tenant from running systemd services
+    # (runpod/moosefs -> "runpod", else -> "farmgpu") and rewrite it on every
+    # sync cycle. That is removed.
+    #
+    # Two things were wrong with it. The fallback had no abstain path, so a
+    # host that matched nothing was asserted as "farmgpu" rather than left
+    # alone -- at lax01, where the valid tenants are hosted.ai / SambaNova /
+    # together.ai, every answer it could give was wrong. And the call sat
+    # outside the `network_only` guard, so it re-fired on the 4-hour network
+    # timer and silently reverted hand-set tenancy within hours.
+    #
+    # Tenant is an ownership/billing fact about a commercial engagement. It is
+    # not observable from inside the host OS, and a running service is not
+    # evidence of it. Tenancy is set deliberately in NetBox by whoever knows
+    # the engagement.
+    #
+    # If tenant should ever be assigned at enrollment, the config-gated
+    # `--tenant.driver` / `--tenant.regex` path (get_tenant / get_netbox_tenant,
+    # used only on device CREATE) is the supported mechanism -- opt-in, per
+    # site, and never re-applied to an existing record. It is unset fleet-wide
+    # today. A RunPod-aware driver for smf01 would go there, not here.
 
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
@@ -1069,9 +1038,6 @@ class ServerBase:
 
         # Refine generic "Server" role based on detected hardware
         self._refine_role(server)
-
-        # Sync tenant based on running services (runpod/moosefs → RunPod, else → FarmGPU)
-        self._sync_tenant(server)
 
         if expansion:
             update = 0
