@@ -484,10 +484,10 @@ class ServerBase:
     # the engagement.
     #
     # If tenant should ever be assigned at enrollment, the config-gated
-    # `--tenant.driver` / `--tenant.regex` path (get_tenant / get_netbox_tenant,
-    # used only on device CREATE) is the supported mechanism -- opt-in, per
-    # site, and never re-applied to an existing record. It is unset fleet-wide
-    # today. A RunPod-aware driver for smf01 would go there, not here.
+    # `--tenant.driver` / `--tenant.regex` path (get_tenant / get_netbox_tenant)
+    # is the supported mechanism. Its driver is evaluated on every sync, but
+    # its result is applied only when creating a device, so existing records
+    # are not updated. A RunPod-aware driver for smf01 would go there, not here.
 
     def _netbox_create_server(self, datacenter, tenant, rack):
         device_role = get_device_role(config.device.server_role)
