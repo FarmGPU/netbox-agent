@@ -119,6 +119,12 @@ class _Device:
     be explicit about whether a re-fetch returns this same row or a
     different object. `_net_obj` points `devices.get` here by default;
     tests that care pass their own.
+
+    `saved` records primary_ip4 as each save() sent it, because the
+    attribute alone cannot tell a value that reached NetBox from one that
+    was only ever assigned in memory -- a drop of the save() call leaves
+    the attribute looking exactly right. A test that installs its own
+    side_effect takes that recording over.
     """
 
     def __init__(self, dev_id, name, primary_ip4, oob_ip):
@@ -126,7 +132,10 @@ class _Device:
         self.name = name
         self.primary_ip4 = primary_ip4
         self.oob_ip = oob_ip
-        self.save = MagicMock(name=f"{name}.save")
+        self.saved = []
+        self.save = MagicMock(
+            name=f"{name}.save", side_effect=lambda: self.saved.append(self.primary_ip4)
+        )
 
 
 def _device(dev_id=7, name="ash079-2031", primary_ip4=None, oob_ip=None):
@@ -903,7 +912,9 @@ class TestOneBadRecordCostsThatRecord:
         )
 
         assert _run(obj)
-        assert refetch.primary_ip4 == primary.id, "left the designation destroyed"
+        assert refetch.saved == [None, primary.id], (
+            "the designation was restored in memory but never written back"
+        )
 
 
 class TestADesignationWeCannotEvenReadProtectsEverything:

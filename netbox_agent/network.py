@@ -1473,8 +1473,7 @@ class Network(object):
             record = nb.ipam.ip_addresses.get(address_id)
         except Exception as e:
             logging.warning(
-                "Could not read back %s's oob_ip (%s); skipping interface "
-                "pruning this run",
+                "Could not read back %s's oob_ip (%s); skipping interface pruning this run",
                 getattr(self.device, "name", "?"),
                 e,
             )
@@ -1596,9 +1595,7 @@ class Network(object):
             netbox_ips = []
             try:
                 for ids in batched((x.id for x in nb_nics), 25):
-                    netbox_ips += list(
-                        nb.ipam.ip_addresses.filter(**{self.intf_type: ids})
-                    )
+                    netbox_ips += list(nb.ipam.ip_addresses.filter(**{self.intf_type: ids}))
             except Exception as e:
                 # Sits between the deletions above and the NIC updates below,
                 # so letting it out means "we deleted some interfaces and
@@ -1632,8 +1629,7 @@ class Network(object):
                 # for the out-of-band address.
                 if oob_address_id is UNRESOLVED:
                     logging.info(
-                        "Cannot tell whether %s is %s's out-of-band address, "
-                        "so not touching it",
+                        "Cannot tell whether %s is %s's out-of-band address, so not touching it",
                         netbox_ip.address,
                         getattr(self.device, "name", "?"),
                     )
