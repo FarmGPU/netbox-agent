@@ -1368,6 +1368,26 @@ class Network(object):
                 return nic.mac_address
             return nic.name
 
+    def _oob_interface_id(self):
+        """The id of the interface carrying this device's oob_ip, if any.
+
+        `self.device.oob_ip` is a nested brief with no assignment on it, so
+        the record has to be read back to learn which interface it sits on.
+        One call per sync; returns None for a VirtualMachine, which has no
+        oob_ip, and for anything we fail to resolve -- callers treat None as
+        "no interface is protected on this ground", and the mgmt_only check
+        still stands.
+        """
+        oob = getattr(self.device, "oob_ip", None)
+        if oob is None:
+            return None
+        try:
+            record = nb.ipam.ip_addresses.get(oob.id)
+        except Exception:
+            logging.debug("Could not read back oob_ip %s", oob, exc_info=True)
+            return None
+        return getattr(record, "assigned_object_id", None) if record else None
+
     def create_or_update_netbox_network_cards(self):
         if config.update_all is None or config.update_network is None:
             return None
@@ -1379,8 +1399,35 @@ class Network(object):
         # may not be visible to the OS and must not be deleted.
         nb_nics = list(self.get_netbox_network_cards())
         local_nics = [self._nic_identifier(x) for x in self.nics]
+        oob_interface_id = self._oob_interface_id()
         for nic in list(nb_nics):
             if self._nic_identifier(nic) not in local_nics:
+                # Deleting an interface takes its IP records with it and nulls
+                # any designation pointing at them, so an interface we cannot
+                # see has to be one we are entitled to judge. Two kinds are
+                # not.
+                #
+                # The one carrying the device's out-of-band address: losing it
+                # loses the only way anyone reaches the BMC.
+                if oob_interface_id is not None and nic.id == oob_interface_id:
+                    logging.info(
+                        "Keeping interface %s on %s: it carries the device's oob_ip",
+                        nic.name,
+                        getattr(self.device, "name", "?"),
+                    )
+                    continue
+                # And any management-only interface: it is not in `ip addr` by
+                # definition, so we only ever learn of it when `ipmitool lan
+                # print` answers, and a silent BMC is not evidence the
+                # interface is gone.
+                if getattr(nic, "mgmt_only", False):
+                    logging.info(
+                        "Keeping management-only interface %s on %s: "
+                        "an in-band agent cannot see it",
+                        nic.name,
+                        getattr(self.device, "name", "?"),
+                    )
+                    continue
                 managed_by = (nic.custom_fields or {}).get("managed_by", "")
                 if managed_by and managed_by != "netbox-agent":
                     logging.debug(
