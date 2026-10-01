@@ -495,6 +495,26 @@ def _build_transceiver_description(ethtool_data):
     return " | ".join(parts)
 
 
+class _Unresolved:
+    """The answer to a question we could not ask.
+
+    Distinct from None, which is a real answer meaning "nothing to
+    protect". Where treating "I do not know" as "nothing to worry about"
+    would authorise a deletion, the two must never be confused -- so this
+    refuses to be used as a boolean rather than quietly picking one of the
+    two readings for a caller who forgot the difference.
+    """
+
+    def __repr__(self):
+        return "UNRESOLVED"
+
+    def __bool__(self):
+        raise TypeError("UNRESOLVED is neither true nor false; compare it with `is`")
+
+
+UNRESOLVED = _Unresolved()
+
+
 class Network(object):
     def __init__(self, server, *args, **kwargs):
         self.nics = []
@@ -1368,25 +1388,81 @@ class Network(object):
                 return nic.mac_address
             return nic.name
 
-    def _oob_interface_id(self):
-        """The id of the interface carrying this device's oob_ip, if any.
+    def _refetch_device(self):
+        """Re-read the object this network belongs to, from its own endpoint.
 
-        `self.device.oob_ip` is a nested brief with no assignment on it, so
-        the record has to be read back to learn which interface it sits on.
-        One call per sync; returns None for a VirtualMachine, which has no
-        oob_ip, and for anything we fail to resolve -- callers treat None as
-        "no interface is protected on this ground", and the mgmt_only check
-        still stands.
+        `self.device` is a Device for ServerNetwork and a VirtualMachine for
+        VirtualNetwork. Reading one from the other's endpoint either finds
+        nothing or finds an unrelated object that happens to share the id,
+        and writing to that is somebody else's data.
         """
-        oob = getattr(self.device, "oob_ip", None)
-        if oob is None:
-            return None
+        if self.assigned_object_type == "dcim.interface":
+            return nb.dcim.devices.get(self.device.id)
+        return nb.virtualization.virtual_machines.get(self.device.id)
+
+    def _oob_ids(self):
+        """What this device's oob_ip designation protects. Read once per run.
+
+        Returns `(address_id, interface_id)`. Each is an id, or None where
+        there is genuinely nothing to protect, or UNRESOLVED where the
+        question could not be answered -- which a caller must read as "do
+        not touch this", never as "there is nothing here". Conflating those
+        two is how a NetBox read that merely timed out turns into
+        permission to delete the one address nobody can reach the machine
+        without.
+
+        The two answers can differ: a brief tells us which address is
+        designated without a round trip, so a failed read-back leaves the
+        address known and only the interface unresolved.
+        """
         try:
-            record = nb.ipam.ip_addresses.get(oob.id)
+            oob = getattr(self.device, "oob_ip", None)
         except Exception:
-            logging.debug("Could not read back oob_ip %s", oob, exc_info=True)
-            return None
-        return getattr(record, "assigned_object_id", None) if record else None
+            # pynetbox resolves an attribute it does not hold by fetching
+            # the object, so this is a network call on anything whose
+            # serializer lacks the field, and the failure arrives as a
+            # transport error rather than an AttributeError.
+            logging.warning(
+                "Could not read oob_ip off %s; leaving its interfaces and "
+                "addresses alone this run",
+                getattr(self.device, "name", "?"),
+            )
+            return UNRESOLVED, UNRESOLVED
+        if oob is None:
+            return None, None
+
+        address_id = getattr(oob, "id", None)
+        if address_id is None:
+            logging.warning(
+                "%s has an oob_ip we cannot identify (%r); leaving its "
+                "interfaces and addresses alone until it can be read",
+                getattr(self.device, "name", "?"),
+                oob,
+            )
+            return UNRESOLVED, UNRESOLVED
+
+        try:
+            record = nb.ipam.ip_addresses.get(address_id)
+        except Exception as e:
+            logging.warning(
+                "Could not read back %s's oob_ip (%s); skipping interface "
+                "pruning this run",
+                getattr(self.device, "name", "?"),
+                e,
+            )
+            return address_id, UNRESOLVED
+        if not record:
+            # pynetbox returns None only for a 404, so the designation
+            # dangles: the record it names is gone. Nothing we prune can
+            # make that worse, and calling it unanswerable would wedge
+            # pruning for this device for good.
+            return address_id, None
+        if getattr(record, "assigned_object_type", None) != self.assigned_object_type:
+            # Assigned to something that is not one of our interfaces.
+            # Comparing the id regardless would match an unrelated
+            # interface that happens to share a number in another id space.
+            return address_id, None
+        return address_id, getattr(record, "assigned_object_id", None)
 
     def create_or_update_netbox_network_cards(self):
         if config.update_all is None or config.update_network is None:
@@ -1399,8 +1475,22 @@ class Network(object):
         # may not be visible to the OS and must not be deleted.
         nb_nics = list(self.get_netbox_network_cards())
         local_nics = [self._nic_identifier(x) for x in self.nics]
-        oob_interface_id = self._oob_interface_id()
-        for nic in list(nb_nics):
+        oob_address_id, oob_interface_id = self._oob_ids()
+        # An in-band agent cannot see a management-only interface: it is not
+        # in `ip addr`, and we only learn of it when `ipmitool lan print`
+        # answers. Nothing on one of these is ours to judge.
+        mgmt_only_ids = {nic.id for nic in nb_nics if getattr(nic, "mgmt_only", False)}
+        if oob_interface_id is UNRESOLVED:
+            # Deleting an interface is not undoable and the one thing that
+            # would have stopped us is the thing we could not read. Keep
+            # everything. A stale interface surviving is the recoverable
+            # mistake -- and if the cause is permanent rather than a bad
+            # minute, pruning stays off for this device until someone fixes
+            # the designation, which is the right way round.
+            prunable = []
+        else:
+            prunable = list(nb_nics)
+        for nic in prunable:
             if self._nic_identifier(nic) not in local_nics:
                 # Deleting an interface takes its IP records with it and nulls
                 # any designation pointing at them, so an interface we cannot
@@ -1472,8 +1562,25 @@ class Network(object):
                 # honour the refusal instead of clearing the designation to
                 # force the unassignment through. In band is not authoritative
                 # for the out-of-band address.
-                device_oob = getattr(self.device, "oob_ip", None)
-                if device_oob and device_oob.id == netbox_ip.id:
+                if oob_address_id is UNRESOLVED:
+                    logging.info(
+                        "Cannot tell whether %s is %s's out-of-band address, "
+                        "so not touching it",
+                        netbox_ip.address,
+                        getattr(self.device, "name", "?"),
+                    )
+                    continue
+
+                if netbox_ip.assigned_object_id in mgmt_only_ids:
+                    logging.info(
+                        "IP %s sits on a management-only interface of %s, "
+                        "which this agent cannot see -- leaving it assigned",
+                        netbox_ip.address,
+                        getattr(self.device, "name", "?"),
+                    )
+                    continue
+
+                if oob_address_id is not None and oob_address_id == netbox_ip.id:
                     logging.info(
                         "IP %s is the oob_ip of %s and is not visible in band — "
                         "leaving it assigned",
@@ -1493,7 +1600,15 @@ class Network(object):
                         getattr(self.device, "name", "?"),
                     )
                     # Re-fetch to avoid stale state
-                    fresh_device = nb.dcim.devices.get(self.device.id)
+                    fresh_device = self._refetch_device()
+                    if fresh_device is None:
+                        logging.warning(
+                            "Could not re-read %s to clear primary_ip4 %s -- "
+                            "leaving the address assigned",
+                            getattr(self.device, "name", "?"),
+                            netbox_ip.address,
+                        )
+                        continue
                     fresh_device.primary_ip4 = None
                     try:
                         fresh_device.save()
@@ -1511,17 +1626,35 @@ class Network(object):
                             e,
                         )
                         continue
-                    # Update local reference so downstream code sees the change
-                    self.device = nb.dcim.devices.get(self.device.id)
+                    # Update local reference so downstream code sees the
+                    # change. The guards above no longer read through it --
+                    # they were resolved once, before the loop -- so a
+                    # re-read that comes back empty cannot disarm them.
+                    self.device = self._refetch_device() or self.device
 
                 logging.info(
                     "Unassigning IP {ip} from {interface}".format(
                         ip=netbox_ip.address, interface=netbox_ip.assigned_object
                     )
                 )
+                was_type = netbox_ip.assigned_object_type
+                was_id = netbox_ip.assigned_object_id
                 netbox_ip.assigned_object_type = None
                 netbox_ip.assigned_object_id = None
-                netbox_ip.save()
+                try:
+                    netbox_ip.save()
+                except Exception as e:
+                    # NetBox refuses to unassign an address designated
+                    # somewhere we did not think to look -- another device's
+                    # oob_ip, say. One stubborn address must not cost us the
+                    # rest of the run (SW-393).
+                    logging.warning(
+                        "Could not unassign %s (%s) -- leaving it alone",
+                        netbox_ip.address,
+                        e,
+                    )
+                    netbox_ip.assigned_object_type = was_type
+                    netbox_ip.assigned_object_id = was_id
 
         # update each nic
         for nic in self.nics:
