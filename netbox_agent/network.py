@@ -1411,61 +1411,70 @@ class Network(object):
                 chain.from_iterable([x["ip"] for x in self.nics if x["ip"] is not None])
             )
             for netbox_ip in netbox_ips:
-                if netbox_ip.address not in all_local_ips:
-                    # If this IP is the device's primary_ip4, clear it first —
-                    # NetBox refuses to unassign an IP that is still designated
-                    # as primary (returns 400 Bad Request).
-                    device_primary = getattr(self.device, "primary_ip4", None)
-                    if device_primary and device_primary.id == netbox_ip.id:
-                        logging.info(
-                            "Clearing primary_ip4 %s on device %s before unassigning",
-                            netbox_ip.address,
-                            getattr(self.device, "name", "?"),
-                        )
-                        # Re-fetch to avoid stale state
-                        fresh_device = nb.dcim.devices.get(self.device.id)
-                        fresh_device.primary_ip4 = None
-                        try:
-                            fresh_device.save()
-                        except Exception as e:
-                            # NetBox may validate other IP fields (e.g., oob_ip)
-                            # that reference IPs not assigned to the device.
-                            # Clear those too and retry.
-                            err_str = str(e)
-                            if "oob_ip" in err_str:
-                                logging.warning(
-                                    "oob_ip validation failed during primary_ip4 clear — "
-                                    "also clearing oob_ip: %s", e,
-                                )
-                                fresh_device.oob_ip = None
-                                fresh_device.save()
-                            else:
-                                raise
-                        # Update local reference so downstream code sees the change
-                        self.device = nb.dcim.devices.get(self.device.id)
+                if netbox_ip.address in all_local_ips:
+                    continue
 
-                    # Clear oob_ip if it points to this IP (NetBox blocks
-                    # unassigning an IP that is designated as oob_ip).
-                    device_oob = getattr(self.device, "oob_ip", None)
-                    if device_oob and device_oob.id == netbox_ip.id:
-                        logging.info(
-                            "Clearing oob_ip %s before unassigning from %s",
-                            netbox_ip.address,
-                            getattr(self.device, "name", "?"),
-                        )
-                        fresh_device = nb.dcim.devices.get(self.device.id)
-                        fresh_device.oob_ip = None
-                        fresh_device.save()
-                        self.device = nb.dcim.devices.get(self.device.id)
-
+                # An address this host cannot see is not evidence the address
+                # is wrong. The BMC address lives on an IPMI channel we read
+                # through ipmitool, which returns nothing on a busy BMC and
+                # nothing at all on a host we have no in-band access to, so a
+                # transient read failure used to detach a perfectly good OOB
+                # address — and it flapped, because the next run that did get
+                # a reading put it back. NetBox refuses to unassign an IP
+                # designated as a device's oob_ip precisely to stop that;
+                # honour the refusal instead of clearing the designation to
+                # force the unassignment through. In band is not authoritative
+                # for the out-of-band address.
+                device_oob = getattr(self.device, "oob_ip", None)
+                if device_oob and device_oob.id == netbox_ip.id:
                     logging.info(
-                        "Unassigning IP {ip} from {interface}".format(
-                            ip=netbox_ip.address, interface=netbox_ip.assigned_object
-                        )
+                        "IP %s is the oob_ip of %s and is not visible in band — "
+                        "leaving it assigned",
+                        netbox_ip.address,
+                        getattr(self.device, "name", "?"),
                     )
-                    netbox_ip.assigned_object_type = None
-                    netbox_ip.assigned_object_id = None
-                    netbox_ip.save()
+                    continue
+
+                # If this IP is the device's primary_ip4, clear it first —
+                # NetBox refuses to unassign an IP that is still designated
+                # as primary (returns 400 Bad Request).
+                device_primary = getattr(self.device, "primary_ip4", None)
+                if device_primary and device_primary.id == netbox_ip.id:
+                    logging.info(
+                        "Clearing primary_ip4 %s on device %s before unassigning",
+                        netbox_ip.address,
+                        getattr(self.device, "name", "?"),
+                    )
+                    # Re-fetch to avoid stale state
+                    fresh_device = nb.dcim.devices.get(self.device.id)
+                    fresh_device.primary_ip4 = None
+                    try:
+                        fresh_device.save()
+                    except Exception as e:
+                        # Some other field on the device fails validation — an
+                        # oob_ip pointing at an address that is no longer
+                        # assigned, say. Leave this address alone rather than
+                        # stripping a second designation to get the first one
+                        # through; that is how we lost the OOB addresses.
+                        logging.warning(
+                            "Could not clear primary_ip4 %s on %s (%s) — "
+                            "leaving the address assigned",
+                            netbox_ip.address,
+                            getattr(self.device, "name", "?"),
+                            e,
+                        )
+                        continue
+                    # Update local reference so downstream code sees the change
+                    self.device = nb.dcim.devices.get(self.device.id)
+
+                logging.info(
+                    "Unassigning IP {ip} from {interface}".format(
+                        ip=netbox_ip.address, interface=netbox_ip.assigned_object
+                    )
+                )
+                netbox_ip.assigned_object_type = None
+                netbox_ip.assigned_object_id = None
+                netbox_ip.save()
 
         # update each nic
         for nic in self.nics:
