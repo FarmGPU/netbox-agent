@@ -699,6 +699,56 @@ class TestTheGuardsRunBeforeAnythingDestructive:
         assert not refetch.save.called, "wrote to the device before sparing it"
         assert refetch.primary_ip4 is both
 
+    def test_a_re_read_that_raises_costs_one_address_not_the_run(self):
+        """The re-fetch is a network call like any other.
+
+        It sits above the try that wraps the save, so a transient failure
+        there used to escape the loop entirely -- one unlucky request
+        costing every later NIC update on the device.
+        """
+        primary = _ip(504, "10.0.1.6/24", iface_id=1)
+        later = _ip(505, "10.0.1.99/24", iface_id=1)
+        device = _device(primary_ip4=primary)
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1")],
+            netbox_ips=[primary, later],
+            local_nics=[HOST_NIC],
+        )
+        nbmock.dcim.devices.get.side_effect = Exception("503 Service Unavailable")
+
+        assert _run(obj), "a failed re-read stopped the whole sync"
+        assert not primary.save.called, "unassigned without clearing primary_ip4"
+        assert later.save.called, "the rest of the batch was abandoned"
+
+    def test_a_re_read_that_raises_after_the_clear_keeps_the_old_reference(self):
+        """The refresh is best-effort; losing it must not lose the run."""
+        primary = _ip(504, "10.0.1.6/24", iface_id=1)
+        device = _device(primary_ip4=primary)
+        refetch = _Device(device.id, device.name, primary, None)
+
+        calls = {"n": 0}
+
+        def _get(_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return refetch
+            raise Exception("503 Service Unavailable")
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1")],
+            netbox_ips=[primary],
+            local_nics=[HOST_NIC],
+        )
+        nbmock.dcim.devices.get.side_effect = _get
+
+        assert _run(obj), "a failed refresh stopped the whole sync"
+        assert refetch.primary_ip4 is None, "the clear did not happen"
+        assert primary.save.called, "the address was not unassigned"
+        assert obj.device is device, "dropped the device reference entirely"
+
     def test_a_refused_unassign_costs_one_address_not_the_run(self):
         """NetBox refuses for reasons we did not anticipate (SW-393)."""
         stubborn = _ip(502, "10.0.1.99/24", iface_id=1)

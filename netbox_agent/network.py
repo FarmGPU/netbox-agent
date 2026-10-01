@@ -1395,10 +1395,28 @@ class Network(object):
         VirtualNetwork. Reading one from the other's endpoint either finds
         nothing or finds an unrelated object that happens to share the id,
         and writing to that is somebody else's data.
+
+        Returns None if the object is gone or could not be read. Those two
+        are worth separating wherever they lead to different actions, and
+        here they do not: both callers respond by leaving the address
+        alone, which is the safe answer to either. Letting the read raise
+        instead would cost the whole sync for one unlucky request, which is
+        the failure this change removes everywhere else.
         """
-        if self.assigned_object_type == "dcim.interface":
-            return nb.dcim.devices.get(self.device.id)
-        return nb.virtualization.virtual_machines.get(self.device.id)
+        endpoint = (
+            nb.dcim.devices
+            if self.assigned_object_type == "dcim.interface"
+            else nb.virtualization.virtual_machines
+        )
+        try:
+            return endpoint.get(self.device.id)
+        except Exception as e:
+            logging.warning(
+                "Could not re-read %s (%s)",
+                getattr(self.device, "name", "?"),
+                e,
+            )
+            return None
 
     def _oob_ids(self):
         """What this device's oob_ip designation protects. Read once per run.
