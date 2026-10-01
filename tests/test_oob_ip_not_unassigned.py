@@ -133,6 +133,36 @@ def _device(dev_id=7, name="ash079-2031", primary_ip4=None, oob_ip=None):
     return _Device(dev_id, name, primary_ip4, oob_ip)
 
 
+class _BriefWhoseIdRaises:
+    """A nested brief that fetches when asked for a field it does not hold."""
+
+    address = "10.0.25.89/24"
+
+    @property
+    def id(self):
+        raise Exception("503 Service Unavailable")
+
+
+class _DeviceWhoseOobIpRaises(_Device):
+    """Reading oob_ip is a network call on a record that lacks the field.
+
+    pynetbox resolves an absent attribute by fetching the object, so the
+    failure arrives as a transport error rather than an AttributeError and
+    the getattr default does not catch it.
+    """
+
+    def __init__(self, dev_id=7, name="ash079-2031"):
+        super().__init__(dev_id, name, None, None)
+
+    @property
+    def oob_ip(self):
+        raise Exception("503 Service Unavailable")
+
+    @oob_ip.setter
+    def oob_ip(self, value):
+        pass
+
+
 def _nb_nic(nic_id, name, mgmt_only=False, managed_by="netbox-agent"):
     """A NetBox interface record.
 
@@ -241,7 +271,7 @@ def _net_obj(device, nb_nics, netbox_ips, local_nics, refetch=None):
     nbmock.ipam.ip_addresses.filter.side_effect = _filter
     nbmock.dcim.devices.get.return_value = device if refetch is None else refetch
 
-    # _oob_interface_id() reads the oob_ip record back to learn which
+    # _oob_ids() reads the oob_ip record back to learn which
     # interface carries it; mirror the fixture rather than inventing one.
     def _ip_get(ip_id):
         for ip in netbox_ips:
@@ -318,7 +348,7 @@ class TestTheOobInterfaceSurvivesABlindRun:
 class TestAnUnanswerableLookupFailsClosed:
     """ "I could not read it" must not be treated as "there is nothing there".
 
-    `_oob_interface_id()` answers which interface carries the oob_ip. If a
+    `_oob_ids()` answers what the oob_ip designation protects. If a
     transient NetBox read turns that question into None, the deletion loop
     reads it as "this device has no oob_ip" and is free to delete the very
     interface the lookup exists to save -- and a non-mgmt_only one has no
@@ -368,18 +398,20 @@ class TestAnUnanswerableLookupFailsClosed:
         AttributeError would at least have been loud; this was silent, and
         it was the outcome the whole change exists to prevent.
         """
+        ipmi_nic = _nb_nic(2, "IPMI", mgmt_only=True)
         oob = _ip(501, "10.0.25.90/24", iface_id=2)
         stale = _ip(502, "10.0.1.99/24", iface_id=1)
         device = _device(oob_ip=SimpleNamespace(address="10.0.25.90/24"))
 
         obj = _net_obj(
             device,
-            nb_nics=[_nb_nic(1, "eno1"), _nb_nic(2, "IPMI", mgmt_only=True)],
+            nb_nics=[_nb_nic(1, "eno1"), ipmi_nic],
             netbox_ips=[oob, stale],
             local_nics=[HOST_NIC],
         )
 
         assert _run(obj), "the sync died on a malformed oob_ip"
+        assert not ipmi_nic.delete.called, "destroyed the interface instead"
         assert not oob.save.called, "detached the address it could not identify"
         assert not stale.save.called, "touched anything at all while blind"
 
@@ -395,7 +427,13 @@ class TestAnUnanswerableLookupFailsClosed:
 
         obj = _net_obj(
             device,
-            nb_nics=[_nb_nic(1, "eno1"), _nb_nic(3, "eno2", mgmt_only=False)],
+            # iface 2 has to be here or `oob` is filtered out before any
+            # guard runs and the assertion below cannot fail.
+            nb_nics=[
+                _nb_nic(1, "eno1"),
+                _nb_nic(2, "IPMI", mgmt_only=True),
+                _nb_nic(3, "eno2", mgmt_only=False),
+            ],
             netbox_ips=[oob, stale],
             local_nics=[HOST_NIC],
         )
@@ -473,6 +511,11 @@ class TestTheOobAddressSurvivesABlindRun:
         fully-silent case the interface is deleted instead, and a test
         written that way passes against the unfixed code for the wrong
         reason, because nothing ever reaches the loop to be spared.
+
+        Two guards cover this address, and the mgmt_only one runs first.
+        That is the real-world arrangement and worth testing as such; the
+        oob guard is isolated separately, on a BMC whose interface nobody
+        marked mgmt_only.
         """
         ipmi_nic = _nb_nic(2, "IPMI", mgmt_only=True)
         oob = _ip(501, "10.0.25.89/24", iface_id=2)
@@ -495,7 +538,8 @@ class TestTheOobAddressSurvivesABlindRun:
 
         Asserted on the re-fetched row as well as the original, because
         production writes to the re-fetch and only that one would show
-        the damage.
+        the damage. As above, the mgmt_only guard is what spares this
+        particular address; the oob guard has its own test.
         """
         ipmi_nic = _nb_nic(2, "IPMI", mgmt_only=True)
         oob = _ip(501, "10.0.25.89/24", iface_id=2)
@@ -599,21 +643,29 @@ class TestOrdinaryStaleAddressesAreStillPruned:
         assert stale.save.called, "an ordinary stale address was spared"
 
     def test_a_stale_primary_is_still_cleared_then_unassigned(self):
-        """primary_ip4 is in-band data, so the agent remains its owner."""
+        """primary_ip4 is in-band data, so the agent remains its owner.
+
+        The re-read returns a distinct object so the reference update is
+        actually observable; pointed at the same row it would pass whether
+        or not the assignment happened.
+        """
         primary = _ip(503, "10.0.1.6/24", iface_id=1)
         device = _device(primary_ip4=primary)
+        refetch = _Device(device.id, device.name, primary, None)
 
         obj = _net_obj(
             device,
             nb_nics=[_nb_nic(1, "eno1")],
             netbox_ips=[primary],
             local_nics=[HOST_NIC],
+            refetch=refetch,
         )
 
         assert _run(obj)
-        assert device.primary_ip4 is None
+        assert refetch.primary_ip4 is None
         assert primary.save.called
         assert primary.assigned_object_type is None
+        assert obj.device is refetch, "did not pick up the re-read device"
 
 
 class TestNothingOnAManagementInterfaceIsOurs:
@@ -639,6 +691,7 @@ class TestNothingOnAManagementInterfaceIsOurs:
         )
 
         assert _run(obj)
+        assert not ipmi_nic.delete.called, "took the interface instead"
         assert not designated.save.called
         assert not other_bmc.save.called, "stripped a BMC address we cannot see"
 
@@ -682,15 +735,18 @@ class TestTheGuardsRunBeforeAnythingDestructive:
         its primary_ip4 nulled and saved before the guard spares the
         address -- a write to a device we were about to decide not to touch.
         """
-        both = _ip(501, "10.0.25.89/24", iface_id=2)
+        # Deliberately NOT mgmt_only: that guard runs earlier and would
+        # spare the address before the ordering under test could matter,
+        # leaving the swap undetected.
+        both = _ip(501, "10.0.25.89/24", iface_id=4)
         device = _device(primary_ip4=both, oob_ip=both)
         refetch = _Device(device.id, device.name, both, both)
 
         obj = _net_obj(
             device,
-            nb_nics=[_nb_nic(1, "eno1"), _nb_nic(2, "IPMI", mgmt_only=True)],
+            nb_nics=[_nb_nic(1, "eno1"), _nb_nic(4, "bmc0", mgmt_only=False)],
             netbox_ips=[both],
-            local_nics=[HOST_NIC, IPMI_NIC_NO_ADDRESS],
+            local_nics=[HOST_NIC],
             refetch=refetch,
         )
 
@@ -772,6 +828,155 @@ class TestTheGuardsRunBeforeAnythingDestructive:
         assert stubborn.assigned_object_type == "dcim.interface"
 
 
+class TestOneBadRecordCostsThatRecord:
+    """The claim the rest of the change rests on, tested per call.
+
+    Every destructive or load-bearing call in these two loops is a network
+    request. If any of them can take the run down, the device never
+    reaches server.py's oob_ip reconvergence -- which is the thing that
+    heals a device this bug has already bitten.
+    """
+
+    def test_a_failed_delete_leaves_the_other_interfaces_prunable(self):
+        stubborn = _nb_nic(3, "eno2", mgmt_only=False)
+        stubborn.delete.side_effect = Exception("502 Bad Gateway")
+        also_stale = _nb_nic(5, "eno3", mgmt_only=False)
+        device = _device()
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1"), stubborn, also_stale],
+            netbox_ips=[],
+            local_nics=[HOST_NIC],
+        )
+
+        assert _run(obj), "one failed delete stopped the whole sync"
+        assert also_stale.delete.called, "the rest of the pruning was abandoned"
+
+    def test_an_interface_we_failed_to_delete_keeps_its_addresses_in_scope(self):
+        """It is still in NetBox, so its addresses are still ours to judge.
+
+        Dropping it from nb_nics before the delete succeeded would take
+        them out of the batch and quietly exempt them.
+        """
+        stubborn = _nb_nic(3, "eno2", mgmt_only=False)
+        stubborn.delete.side_effect = Exception("502 Bad Gateway")
+        orphan = _ip(502, "10.0.1.99/24", iface_id=3)
+        device = _device()
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1"), stubborn],
+            netbox_ips=[orphan],
+            local_nics=[HOST_NIC],
+        )
+
+        assert _run(obj)
+        assert orphan.save.called, "its addresses fell out of the batch"
+
+    def test_a_failed_address_read_still_leaves_the_run_to_finish(self):
+        """It sits between the deletions and server.py's reconvergence."""
+        device = _device()
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1")],
+            netbox_ips=[],
+            local_nics=[HOST_NIC],
+        )
+        nbmock.ipam.ip_addresses.filter.side_effect = Exception("504 Gateway Timeout")
+
+        assert _run(obj), "a failed address read stopped the whole sync"
+
+    def test_a_refused_unassign_puts_primary_ip4_back(self):
+        """We nulled it to make room for a write that did not happen."""
+        primary = _ip(504, "10.0.1.6/24", iface_id=1)
+        primary.save.side_effect = Exception("400: refused for some other reason")
+        device = _device(primary_ip4=primary)
+        refetch = _Device(device.id, device.name, primary, None)
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1")],
+            netbox_ips=[primary],
+            local_nics=[HOST_NIC],
+            refetch=refetch,
+        )
+
+        assert _run(obj)
+        assert refetch.primary_ip4 == primary.id, "left the designation destroyed"
+
+
+class TestADesignationWeCannotEvenReadProtectsEverything:
+    def test_an_oob_ip_read_that_raises_leaves_the_device_alone(self):
+        """pynetbox fetches an absent field, so this read is a network call.
+
+        It is the one branch of _oob_ids that no fixture could reach while
+        oob_ip was a plain attribute, and a device whose designation we
+        cannot read at all is the last one to start deleting things on.
+        """
+        ipmi_nic = _nb_nic(2, "IPMI", mgmt_only=True)
+        stale_iface = _nb_nic(3, "eno2", mgmt_only=False)
+        bmc_address = _ip(501, "10.0.25.89/24", iface_id=2)
+        stale = _ip(502, "10.0.1.99/24", iface_id=3)
+        device = _DeviceWhoseOobIpRaises()
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1"), ipmi_nic, stale_iface],
+            netbox_ips=[bmc_address, stale],
+            local_nics=[HOST_NIC],
+        )
+
+        assert _run(obj), "the sync died rather than backing off"
+        assert not ipmi_nic.delete.called
+        assert not stale_iface.delete.called, "pruned while unable to read"
+        assert not bmc_address.save.called
+        assert not stale.save.called, "unassigned while unable to read"
+
+    def test_an_oob_ip_whose_id_raises_leaves_the_device_alone(self):
+        """The brief is a record too, and reading a field it lacks fetches.
+
+        This is the branch whose whole job is to fail safe, so it is the
+        last place that should be able to raise on the way there.
+        """
+        stale_iface = _nb_nic(3, "eno2", mgmt_only=False)
+        stale = _ip(502, "10.0.1.99/24", iface_id=3)
+        device = _device(oob_ip=_BriefWhoseIdRaises())
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1"), stale_iface],
+            netbox_ips=[stale],
+            local_nics=[HOST_NIC],
+        )
+
+        assert _run(obj), "the sync died reading the designation"
+        assert not stale_iface.delete.called, "pruned while unable to read"
+        assert not stale.save.called, "unassigned while unable to read"
+
+
+class TestAnotherWorkersInterfaceIsStillSafe:
+    def test_managed_by_someone_else_is_not_deleted(self):
+        """Pre-existing guard, and this file is now the only one running it.
+
+        bmc-scan and proxmox-sync create interfaces the OS cannot see; the
+        two new guards run ahead of this one, so its own coverage went
+        with tests/test_network_ip.py.
+        """
+        theirs = _nb_nic(3, "eno2", mgmt_only=False, managed_by="bmc-scan")
+        device = _device()
+
+        obj = _net_obj(
+            device,
+            nb_nics=[_nb_nic(1, "eno1"), theirs],
+            netbox_ips=[],
+            local_nics=[HOST_NIC],
+        )
+
+        assert _run(obj)
+        assert not theirs.delete.called
+
+
 class TestTheSentinel:
     def test_it_refuses_to_be_a_boolean(self):
         """`if oob_interface_id:` must not quietly mean "nothing to protect"."""
@@ -786,7 +991,7 @@ class TestTheSentinel:
 
         obj._refetch_device()
 
-        assert nbmock.virtualization.virtual_machines.get.called
+        nbmock.virtualization.virtual_machines.get.assert_called_once_with(9)
         assert not nbmock.dcim.devices.get.called
 
 
