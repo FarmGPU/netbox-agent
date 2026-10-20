@@ -1070,24 +1070,18 @@ class ServerBase:
             server.oob_ip = None
             oob_update = True
 
-        # Set oob_ip to any IP attached to a mgmt_only interface (IPMI on
+        # Point oob_ip at an IP attached to a mgmt_only interface (IPMI on
         # standard servers, oob_net0 on BlueField DPUs, BMC-port on any
         # future class). The legacy `display == "IPMI"` check is kept as
         # a fallback for IPs whose nested assigned_object representation
         # doesn't surface mgmt_only — should be rare, since the agent
         # itself sets mgmt_only=True on IPMI ifaces it creates.
         if not oob_update:
-            for ip in myips:
-                if not ip.assigned_object or ip == server.oob_ip:
-                    continue
-                ao = ip.assigned_object
-                is_mgmt = bool(getattr(ao, "mgmt_only", False))
-                if not is_mgmt and getattr(ao, "display", None) == "IPMI":
-                    is_mgmt = True
-                if is_mgmt:
-                    server.oob_ip = ip.id
-                    oob_update = True
-                    break
+            observed = (getattr(self.network, "ipmi", None) or {}).get("ip") or []
+            new_oob, oob_changed = self._resolve_oob_ip(server.oob_ip, myips, observed)
+            if oob_changed:
+                server.oob_ip = new_oob
+                oob_update = True
 
         if oob_update:
             try:
@@ -1261,6 +1255,49 @@ class ServerBase:
             new_id = desired
 
         return new_id, new_id != current_id
+
+    @staticmethod
+    def _resolve_oob_ip(current, myips, observed):
+        """
+        Decide what oob_ip should point at.
+
+        Returns (new_ip_id_or_None, changed). `observed` is what `ipmitool
+        lan print` reported this run -- a list of "a.b.c.d/32" strings, empty
+        when the BMC was silent.
+
+        Rules, applied in order:
+          * an address on a management-only interface that ipmitool reported
+            this run wins -- this is what follows a BMC that was re-addressed;
+          * otherwise whatever is already set stands;
+          * otherwise the first address on a management-only interface.
+
+        The agent no longer unassigns BMC addresses it cannot see, so an IPMI
+        interface can carry a live address and a leftover. Picking "any mgmt
+        address that is not the current one" then swapped oob_ip between the
+        two on every run, pointing NetBox at a dead BMC half the time.
+        """
+        current_id = current.id if current else None
+
+        candidates = []
+        for ip in myips:
+            ao = ip.assigned_object
+            if not ao:
+                continue
+            if getattr(ao, "mgmt_only", False) or getattr(ao, "display", None) == "IPMI":
+                candidates.append(ip)
+
+        # ipmi.py reports a /32 while NetBox usually holds the real mask, so
+        # compare host parts only.
+        observed_hosts = {str(a).split("/")[0] for a in observed}
+        for ip in candidates:
+            if str(ip.address).split("/")[0] in observed_hosts:
+                return ip.id, ip.id != current_id
+
+        if current_id is not None:
+            return current_id, False
+        if candidates:
+            return candidates[0].id, True
+        return None, False
 
     def _get_default_gateway_interface(self):
         """
