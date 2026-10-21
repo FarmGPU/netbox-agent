@@ -119,6 +119,7 @@ def _make_server(device, inferred_tenant):
     """A ServerBase whose collaborators all no-op, so the sync runs to the end
     without touching the host or NetBox."""
     server = ServerBase.__new__(ServerBase)
+    server.network = None  # set by __init__, which __new__ skips
 
     # Local facts match what NetBox already holds, so nothing but the
     # agent-owned custom fields comes out dirty.
